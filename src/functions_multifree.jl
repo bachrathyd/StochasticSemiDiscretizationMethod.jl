@@ -3,31 +3,72 @@ using LinearAlgebra
 using StaticArrays
 using Arpack
 using IterativeSolvers
+using KrylovKit
 
 # Multiplication-Free Stochastic Semi-Discretization Method
 
-struct MFCoefficients{d, T, L}
+"""
+    MFCoefficients{d, L, L2, Ld}
+
+Holds the precomputed discretized coefficients for the Multiplication-Free SSDM.
+- `det`: Deterministic step matrices A_k for each step.
+- `stoch_op`: Precomputed stochastic operator matrices E[G_k ⊗ G_l] for the second moment.
+- `detV`: Deterministic additive vector f_n for each step.
+- `stochV`: Integrated integrated noise variance E[g_n g_n'] for each step.
+- `stochGV`: Cross-terms between state coefficients and integrated noise E[G_k y_k g_n'].
+"""
+struct MFCoefficients{d, L, L2, Ld}
     det::Vector{Vector{Tuple{SMatrix{d, d, Float64, L}, Int}}}
-    stoch::Vector{Vector{Tuple{SMatrix{d, d, SVector{T, Float64}, L}, Int, Int}}}
-    # Additive terms
+    stoch_op::Vector{Vector{Tuple{SMatrix{L, L, Float64, L2}, Int, Int}}}
     detV::Vector{SVector{d, Float64}}
-    stochV::Vector{SMatrix{d, d, Float64, L}} # E[g_n g_n']
-    stochGV::Vector{Vector{Tuple{Array{Float64, 3}, Int, Int}}} # E[G_n,k(a,c) * g_n(b)] -> (a,b,c)
+    stochV::Vector{SMatrix{d, d, Float64, L}}
+    stochGV::Vector{Vector{Tuple{SMatrix{L, d, Float64, Ld}, Int, Int}}}
 end
 
+"""
+    stDiscreteMapping_M2_MF
+
+Mapping object for the second moment Multiplication-Free SSDM.
+"""
 struct stDiscreteMapping_M2_MF{tT, mx1T, mx12T, v1T, v2T, rstT, coeffT}
     ts::Vector{tT}
-    M1_MXs::Vector{mx1T} # F [time]
-    M1_Vs::Vector{v1T} # c_1 [time]
-    M1toM2_MXs::Vector{mx12T} # C [time]
-    M2_Vs::Vector{v2T} # c_2 [time]
+    M1_MXs::Vector{mx1T}
+    M1_Vs::Vector{v1T}
+    M1toM2_MXs::Vector{mx12T}
+    M2_Vs::Vector{v2T}
     rst::rstT
     coeffs::coeffT
+end
+
+"""
+    MFWorkspace{d, L}
+
+Pre-allocated buffers to minimize GC pressure during iterative mapping application.
+"""
+mutable struct MFWorkspace{d, L}
+    C::Matrix{SMatrix{d, d, Float64, L}}
+    v::Vector{SVector{d, Float64}}
+    C_next_m::Vector{SMatrix{d, d, Float64, L}}
+    v_in_zero::Vector{Float64}
+end
+
+function MFWorkspace(rst::AbstractResult{d}) where d
+    r = div(rst.n, d) - 1
+    L = d*d
+    C = [zero(SMatrix{d, d, Float64, L}) for i in 1:(r+1), j in 1:(r+1)]
+    v = [zero(SVector{d, Float64}) for i in 1:(r+1)]
+    C_next_m = Vector{SMatrix{d, d, Float64, L}}(undef, r + 1)
+    v_in_zero = zeros((r+1)*d)
+    return MFWorkspace{d, L}(C, v, C_next_m, v_in_zero)
 end
 
 function get_all_coefficients(rst::AbstractResult{d}) where d
     p = rst.n_steps
     L = d*d
+    L2 = L*L
+    Ld = L*d
+    
+    # 1. Deterministic coefficients
     det_all = [Tuple{SMatrix{d, d, Float64, L}, Int}[] for _ in 1:p]
     for (delay_type, submxs) in enumerate(rst.subMXs)
         for i in 1:p
@@ -40,8 +81,9 @@ function get_all_coefficients(rst::AbstractResult{d}) where d
         end
     end
     
+    # 2. Stochastic coefficients
     K = length(rst.itoisometrymethod)
-    stoch_all = [Tuple{SMatrix{d, d, SVector{K, Float64}, L}, Int, Int}[] for _ in 1:p]
+    stoch_raw = [Tuple{SMatrix{d, d, SVector{K, Float64}, L}, Int, Int}[] for _ in 1:p]
     for (noise_type, stsubmxs) in enumerate(rst.stsubMXs)
         for i in 1:p
             stsmx = stsubmxs[i]
@@ -49,11 +91,32 @@ function get_all_coefficients(rst::AbstractResult{d}) where d
             for (range_idx, (r_target, r_source)) in enumerate(stsmx.ranges)
                 k = Int((r_source.start - 1) / d)
                 G = stsmx.MXfun[range_idx] 
-                push!(stoch_all[i], (SMatrix{d,d,SVector{K,Float64},L}(G), k, w))
+                push!(stoch_raw[i], (SMatrix{d,d,SVector{K,Float64},L}(G), k, w))
             end
         end
     end
 
+    # Pre-contract Ito Isometry for E[Gk ⊗ Gl]
+    stoch_op = [Tuple{SMatrix{L, L, Float64, L2}, Int, Int}[] for _ in 1:p]
+    for i in 1:p
+        step_stoch = stoch_raw[i]
+        for (Gk, k, wk) in step_stoch
+            for (Gl, l, wl) in step_stoch
+                if wk == wl
+                    E_mat_M = zeros(MMatrix{L, L, Float64, L2})
+                    for a in 1:d, b in 1:d, c in 1:d, dd in 1:d
+                        # vec(Gk C Gl') = (Gl ⊗ Gk) vec(C)
+                        row = a + (b-1)*d
+                        col = c + (dd-1)*d
+                        E_mat_M[row, col] = rst.itoisometrymethod(Gk[a,c], Gl[b,dd])
+                    end
+                    push!(stoch_op[i], (SMatrix{L,L,Float64,L2}(E_mat_M), k, l))
+                end
+            end
+        end
+    end
+
+    # 3. Additive terms
     detV = [SVector{d, Float64}(zeros(d)) for _ in 1:p]
     if rst.calculate_additive && !isempty(rst.subVs)
         for i in 1:p
@@ -62,7 +125,7 @@ function get_all_coefficients(rst::AbstractResult{d}) where d
     end
 
     stochV = [zeros(SMatrix{d, d, Float64, L}) for _ in 1:p]
-    stochGV = [Tuple{Array{Float64, 3}, Int, Int}[] for _ in 1:p]
+    stochGV = [Tuple{SMatrix{L, d, Float64, Ld}, Int, Int}[] for _ in 1:p]
     
     if rst.calculate_additive && !isempty(rst.stsubVs)
         for i in 1:p
@@ -82,11 +145,12 @@ function get_all_coefficients(rst::AbstractResult{d}) where d
                             k = Int((r_source.start - 1) / d)
                             Gfun = stsmx.MXfun[range_idx]
                             gfun = stsv.Vfun
-                            E_Gg = zeros(d, d, d) # (a, b, c) -> E[G_ac * g_b]
+                            
+                            E_Gg_M = zeros(MMatrix{L, d, Float64, Ld})
                             for a in 1:d, b in 1:d, c in 1:d
-                                E_Gg[a, b, c] = rst.itoisometrymethod(Gfun[a, c], gfun[b])
+                                E_Gg_M[a + (b-1)*d, c] = rst.itoisometrymethod(Gfun[a, c], gfun[b])
                             end
-                            push!(stochGV[i], (E_Gg, k, w))
+                            push!(stochGV[i], (SMatrix{L, d, Float64, Ld}(E_Gg_M), k, w))
                         end
                     end
                 end
@@ -95,7 +159,7 @@ function get_all_coefficients(rst::AbstractResult{d}) where d
         end
     end
 
-    return MFCoefficients{d, K, L}(det_all, stoch_all, detV, stochV, stochGV)
+    return MFCoefficients{d, L, L2, Ld}(det_all, stoch_op, detV, stochV, stochGV)
 end
 
 function DiscreteMapping_M2_MF(rst::AbstractResult)
@@ -106,22 +170,19 @@ function DiscreteMapping_M2_MF(rst::AbstractResult)
     return stDiscreteMapping_M2_MF(dm1.ts, dm1.M1_MXs, dm1.M1_Vs, M1toM2_MXs, M2_Vs, rst, coeffs)
 end
 
-function apply_stoch_mapping(Gk::SMatrix{d,d,SVector{K,Float64},L}, Gl::SMatrix{d,d,SVector{K,Float64},L}, Ckl, rst) where {d, K, L}
-    res = zeros(MMatrix{d, d, Float64, L})
-    for a in 1:d, b in 1:d
-        val = 0.0
-        for c in 1:d, dd in 1:d
-            val += rst.itoisometrymethod(Gk[a,c], Gl[b,dd]) * Ckl[c,dd]
-        end
-        res[a, b] = val
-    end
-    return SMatrix{d,d,Float64,L}(res)
+function DiscreteMapping_M2_MF(LDDEP::LDDEProblem, method::DiscretizationMethod, DiscretizationLength::Real; args...)
+    DiscreteMapping_M2_MF(StochasticSemiDiscretizationMethod.calculateResults(LDDEP, method, DiscretizationLength; args...))
 end
 
-function apply_mapping_M1_MF(rst::AbstractResult{d}, coeffs::MFCoefficients{d, K, L}, v_in::AbstractVector; include_additive=false) where {d, K, L}
-    r = StochasticSemiDiscretizationMethod.rOfDelay(rst.ts[end], rst.method)
+"""
+    apply_mapping_M1_MF!(ws, rst, coeffs, v_in; include_additive)
+
+Applies the first-moment mapping using the Multiplication-Free method.
+"""
+function apply_mapping_M1_MF!(ws::MFWorkspace{d, L}, rst::AbstractResult{d}, coeffs::MFCoefficients{d, L, L2, Ld}, v_in::AbstractVector; include_additive=false) where {d, L, L2, Ld}
+    r = div(rst.n, d) - 1
     p = rst.n_steps
-    v = [zero(SVector{d, Float64}) for i in 1:(r+1)]
+    v = ws.v
     c_idx(n) = mod(n, r+1) + 1
     for i in 0:r
         v[c_idx(-i)] = SVector{d, Float64}(v_in[i*d+1:(i+1)*d])
@@ -144,15 +205,22 @@ function apply_mapping_M1_MF(rst::AbstractResult{d}, coeffs::MFCoefficients{d, K
     return v_out
 end
 
-function apply_mapping_M2_MF(rst::AbstractResult{d}, coeffs::MFCoefficients{d, K, L}, m_in::AbstractVector, v_in::AbstractVector; include_additive=false) where {d, K, L}
-    r = StochasticSemiDiscretizationMethod.rOfDelay(rst.ts[end], rst.method)
+"""
+    apply_mapping_M2_MF!(ws, rst, coeffs, m_in, v_in; include_additive)
+
+Applies the second-moment mapping using the Multiplication-Free method.
+"""
+function apply_mapping_M2_MF!(ws::MFWorkspace{d, L}, rst::AbstractResult{d}, coeffs::MFCoefficients{d, L, L2, Ld}, m_in::AbstractVector, v_in::AbstractVector; include_additive=false) where {d, L, L2, Ld}
+    r = div(rst.n, d) - 1
     p = rst.n_steps
     idx = StochasticSemiDiscretizationMethod.CovVecIdx((r + 1) * d)
     
-    C = [zero(SMatrix{d, d, Float64, L}) for i in 1:(r+1), j in 1:(r+1)]
-    v = [zero(SVector{d, Float64}) for i in 1:(r+1)]
+    C = ws.C
+    v = ws.v
+    C_next_m = ws.C_next_m
     c_idx(n) = mod(n, r+1) + 1
     
+    # 0. Initialize
     for i in 0:r
         v[c_idx(-i)] = SVector{d, Float64}(v_in[i*d+1:(i+1)*d])
         for j in 0:r
@@ -164,25 +232,25 @@ function apply_mapping_M2_MF(rst::AbstractResult{d}, coeffs::MFCoefficients{d, K
         end
     end
     
+    # 1. Propagate
     for n in 0:p-1
         next_n = n + 1
         det_step = coeffs.det[next_n]
-        stoch_step = coeffs.stoch[next_n]
+        stoch_op = coeffs.stoch_op[next_n]
         detV = coeffs.detV[next_n]
         
-        # 1. Calculate next v
-        v_next = zeros(MVector{d, Float64})
+        # v(n+1)
+        v_next_M = zeros(MVector{d, Float64})
         for (A, k) in det_step
-            v_next .+= A * v[c_idx(n-k)]
+            v_next_M .+= A * v[c_idx(n-k)]
         end
         if include_additive
-            v_next .+= detV
+            v_next_M .+= detV
         end
-        v_next_S = SVector{d, Float64}(v_next)
+        v_next_S = SVector{d, Float64}(v_next_M)
         
-        # 2. Calculate next C(next_n, m)
-        C_next_m = Vector{SMatrix{d, d, Float64, L}}(undef, r + 1)
-        for (i, m) in enumerate(next_n-r:n)
+        # C(n+1, m)
+        for (i, m) in enumerate(n-r:n)
             res = zeros(MMatrix{d, d, Float64, L})
             for (A, k) in det_step
                 res .+= A * C[c_idx(n-k), c_idx(m)]
@@ -193,54 +261,46 @@ function apply_mapping_M2_MF(rst::AbstractResult{d}, coeffs::MFCoefficients{d, K
             C_next_m[i] = SMatrix{d,d,Float64,L}(res)
         end
         
-        # 3. Calculate next C(next_n, next_n)
+        # C(n+1, n+1)
         res_diag = zeros(MMatrix{d, d, Float64, L})
         for (Ak, k) in det_step, (Al, l) in det_step
             res_diag .+= Ak * C[c_idx(n-k), c_idx(n-l)] * Al'
         end
-        for (Gk, k, wk) in stoch_step, (Gl, l, wl) in stoch_step
-            if wk == wl
-                res_diag .+= apply_stoch_mapping(Gk, Gl, C[c_idx(n-k), c_idx(n-l)], rst)
-            end
+        
+        for (E_mat, k, l) in stoch_op
+            Ckl_vec = SVector{L, Float64}(C[c_idx(n-k), c_idx(n-l)])
+            res_vec = E_mat * Ckl_vec
+            res_diag .+= SMatrix{d, d, Float64, L}(res_vec)
         end
         
         if include_additive
-            # Deterministic additive terms
-            # Fv f' + f (Fv)' + f f'
-            # Fv = sum Ak v(n-k)
-            Fv = zeros(MVector{d, Float64})
-            for (Ak, k) in det_step
-                Fv .+= Ak * v[c_idx(n-k)]
-            end
-            res_diag .+= Fv * detV' .+ detV * Fv' .+ detV * detV'
-            
-            # Stochastic additive terms E[g g']
+            Fv = v_next_S - detV
+            res_diag .+= detV * Fv' + Fv * detV' + detV * detV'
             res_diag .+= coeffs.stochV[next_n]
-            
-            # Cross terms E[G y g' + g y' G']
-            for (E_Gg, k, w) in coeffs.stochGV[next_n]
-                # sum_c E[G_ac g_b] y_c
-                term = zeros(MMatrix{d, d, Float64, L})
-                for a in 1:d, b in 1:d, c in 1:d
-                    term[a, b] += E_Gg[a, b, c] * v[c_idx(n-k)][c]
-                end
-                res_diag .+= term .+ term'
+            for (E_Gg_mat, k, w) in coeffs.stochGV[next_n]
+                term_vec = E_Gg_mat * v[c_idx(n-k)]
+                term = SMatrix{d, d, Float64, L}(term_vec)
+                res_diag .+= term + term'
             end
         end
         
-        C_next_m[r + 1] = SMatrix{d,d,Float64,L}(res_diag)
+        C_final_diag = SMatrix{d,d,Float64,L}(res_diag)
         
-        # Update buffer
+        # Update
         v[c_idx(next_n)] = v_next_S
-        for (i, m) in enumerate(next_n-r:next_n)
+        for (i, m) in enumerate(n-r:n)
             C[c_idx(next_n), c_idx(m)] = C_next_m[i]
             C[c_idx(m), c_idx(next_n)] = C_next_m[i]'
         end
+        C[c_idx(next_n), c_idx(next_n)] = C_final_diag
     end
     
+    # 2. Extract
     m_out = zeros(length(m_in))
     for i in 0:r, j in 0:r
-        Mat = C[c_idx(p-i), c_idx(p-j)]
+        p_i_idx = c_idx(p-i)
+        p_j_idx = c_idx(p-j)
+        Mat = C[p_i_idx, p_j_idx]
         for r_row in 1:d, r_col in 1:d
             vi = i*d + r_row
             vj = j*d + r_col
@@ -252,16 +312,13 @@ function apply_mapping_M2_MF(rst::AbstractResult{d}, coeffs::MFCoefficients{d, K
     return m_out
 end
 
-function apply_mapping_M2_MF(rst::AbstractResult{d}, coeffs::MFCoefficients{d, K, L}, m_in::AbstractVector; include_additive=false) where {d, K, L}
-    r = StochasticSemiDiscretizationMethod.rOfDelay(rst.ts[end], rst.method)
-    v_in = zeros((r+1)*d) # Homogeneous if no v_in provided
-    return apply_mapping_M2_MF(rst, coeffs, m_in, v_in, include_additive=include_additive)
-end
+# --- Mapping Operators ---
 
-struct MFMappingOperator{ResultT, CoeffT} <: AbstractMatrix{Float64}
+struct MFMappingOperator{ResultT, CoeffT, WsT} <: AbstractMatrix{Float64}
     rst::ResultT
     coeffs::CoeffT
     D::Int
+    ws::WsT
 end
 Base.size(op::MFMappingOperator) = (op.D, op.D)
 Base.size(op::MFMappingOperator, i::Int) = i <= 2 ? op.D : 1
@@ -270,28 +327,42 @@ LinearAlgebra.issymmetric(op::MFMappingOperator) = false
 LinearAlgebra.ishermitian(op::MFMappingOperator) = false
 
 function LinearAlgebra.mul!(y::AbstractVector, op::MFMappingOperator, x::AbstractVector)
-    y .= apply_mapping_M2_MF(op.rst, op.coeffs, x, include_additive=false)
+    y .= apply_mapping_M2_MF!(op.ws, op.rst, op.coeffs, x, op.ws.v_in_zero, include_additive=false)
 end
 
-struct M1MFMappingOperator{ResultT, CoeffT} <: AbstractMatrix{Float64}
+struct M1MFMappingOperator{ResultT, CoeffT, WsT} <: AbstractMatrix{Float64}
     rst::ResultT
     coeffs::CoeffT
     D::Int
+    ws::WsT
 end
 Base.size(op::M1MFMappingOperator) = (op.D, op.D)
 Base.size(op::M1MFMappingOperator, i::Int) = i <= 2 ? op.D : 1
 Base.eltype(op::M1MFMappingOperator) = Float64
 
 function LinearAlgebra.mul!(y::AbstractVector, op::M1MFMappingOperator, x::AbstractVector)
-    y .= apply_mapping_M1_MF(op.rst, op.coeffs, x, include_additive=false)
+    y .= apply_mapping_M1_MF!(op.ws, op.rst, op.coeffs, x, include_additive=false)
 end
 
-function spectralRadiusOfMapping_MF(dm::stDiscreteMapping_M2_MF{tT, mx1T, mx12T, v1T, v2T, ResultT, coeffT}; args...) where {tT, mx1T, mx12T, v1T, v2T, d, ResultT <: AbstractResult{d}, coeffT}
-    r = StochasticSemiDiscretizationMethod.rOfDelay(dm.ts[end], dm.rst.method)
+# --- User API ---
+
+function spectralRadiusOfMapping_MF(dm::stDiscreteMapping_M2_MF; solver=:KrylovKit, args...)
+    # coeffs.det[1][1][1] is the first SMatrix in the first step
+    d = size(dm.coeffs.det[1][1][1], 1)
+    r = div(dm.rst.n, d) - 1
     D = StochasticSemiDiscretizationMethod.CovVecIdx((r+1)*d).sectionStarts[end]
-    op = MFMappingOperator(dm.rst, dm.coeffs, D)
-    res, _ = eigs(op, v0=rand(D); args...)
-    return abs(res[1])
+    ws = MFWorkspace(dm.rst)
+    op = MFMappingOperator(dm.rst, dm.coeffs, D, ws)
+    
+    if solver == :Arpack
+        res, _ = eigs(op, v0=rand(D); args...)
+        return abs(res[1])
+    elseif solver == :KrylovKit
+        vals, _, _ = eigsolve(op, rand(D), 1, :LM; args...)
+        return abs(vals[1])
+    else
+        error("Unknown solver: $solver. Use :Arpack or :KrylovKit.")
+    end
 end
 
 struct IMinusPhiOperator{OpT} <: AbstractMatrix{Float64}
@@ -305,22 +376,19 @@ function LinearAlgebra.mul!(y::AbstractVector, mop::IMinusPhiOperator, x::Abstra
     y .= x .- y
 end
 
-function fixPointOfMapping_MF(dm::stDiscreteMapping_M2_MF{tT, mx1T, mx12T, v1T, v2T, ResultT, coeffT}; args...) where {tT, mx1T, mx12T, v1T, v2T, d, ResultT <: AbstractResult{d}, coeffT}
-    r = StochasticSemiDiscretizationMethod.rOfDelay(dm.ts[end], dm.rst.method)
+function fixPointOfMapping_MF(dm::stDiscreteMapping_M2_MF; args...)
+    d = size(dm.coeffs.det[1][1][1], 1)
+    r = div(dm.rst.n, d) - 1
     D1 = (r+1)*d
     D2 = StochasticSemiDiscretizationMethod.CovVecIdx(D1).sectionStarts[end]
+    ws = MFWorkspace(dm.rst)
     
-    # 1. First moment fixed point
-    op1 = M1MFMappingOperator(dm.rst, dm.coeffs, D1)
-    k1 = apply_mapping_M1_MF(dm.rst, dm.coeffs, zeros(D1), include_additive=true)
+    op1 = M1MFMappingOperator(dm.rst, dm.coeffs, D1, ws)
+    k1 = apply_mapping_M1_MF!(ws, dm.rst, dm.coeffs, zeros(D1), include_additive=true)
     v_star = gmres(IMinusPhiOperator(op1), k1; reltol=1e-15, args...)
     
-    # 2. Second moment additive part
-    k2 = apply_mapping_M2_MF(dm.rst, dm.coeffs, zeros(D2), v_star, include_additive=true)
-    
-    # 3. Second moment fixed point
-    op2 = MFMappingOperator(dm.rst, dm.coeffs, D2)
+    k2 = apply_mapping_M2_MF!(ws, dm.rst, dm.coeffs, zeros(D2), v_star, include_additive=true)
+    op2 = MFMappingOperator(dm.rst, dm.coeffs, D2, ws)
     m_star = gmres(IMinusPhiOperator(op2), k2; reltol=1e-15, args...)
     return m_star
 end
-
