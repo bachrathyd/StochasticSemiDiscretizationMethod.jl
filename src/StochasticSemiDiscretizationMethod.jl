@@ -34,6 +34,7 @@ include("structures_result.jl")
 include("functions_method.jl")
 include("functions_stoch_utilities.jl")
 include("functions_discretization.jl")
+include("functions_multifree.jl")
 
 export  SemiDiscretization, NumericSD, 
 ProportionalMX,
@@ -42,8 +43,11 @@ stCoeffMX,
 Additive, stAdditive,
 LDDEProblem,
 DiscreteMapping_M1, DiscreteMapping_M2,
+DiscreteMapping_M2_MF,
 MxToCovVec, VecToCovMx,
 # DiscreteMapping_M1_1step, DiscreteMapping_M2_1step,
-fixPointOfMapping, spectralRadiusOfMapping
+fixPointOfMapping, spectralRadiusOfMapping,
+spectralRadiusOfMapping_MF,
+fixPointOfMapping_MF
 
 end # module
