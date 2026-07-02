@@ -93,6 +93,35 @@ reference — and of v6's genuine O(h²) cap, both now fixed. Note SDM q=1 and
 q=2 sit on the SAME curve at measured order ≈1 here: the nominal q-ladder does
 not apply to this problem class.
 
+## v8 — integrated-history engine (matrix, time-dependent B): 8th order+
+
+`cov_colloc_v8.jl` stores per-block **B-weighted integrated-history DOFs**
+`J_i = ∫ B_read(s)·x(s) ds` (with the *reading* step's B — exact for periodic
+coefficients), so the delayed drift integral is exact even for a
+Brownian-rough delayed path; the node–J / J–J noise covariances come from the
+matrix causal kernel. Validation (`v8m_validate/targets/highorder.jl`):
+
+* all v7 gates preserved (noise-off exact, present-noise O(h^2S), values);
+* critical stoch. Mathieu: GL3 rates 5.82/5.91/5.97/6.06 → 0.15624206;
+* rough-read d=2 (delayed **velocity** feedback, periodic A): v7 caps at
+  exactly 2.0; v8 GL2 clean 4.0, GL3 to the arbiter floor (4e-10) by p=12;
+* **hard mirror Mathieu (mixed noise): GL4 rates 6.93/7.99/7.93 = O(h⁸);
+  GL5 opens above order 10** (reference-floor limited);
+* present-noise exact test: GL4 7.93 → machine ε; GL5 at machine ε from p=4.
+
+Measured order summary (ρ(H)):
+
+| problem class | GL2 | GL3 | GL4 | GL5 |
+|---|---|---|---|---|
+| smooth-read (Mathieu class, any noise mix) | 4 | 6 | **8** | ≥10 (floor) |
+| rough-read (delayed drift reads a noise-carrying component) | 4 | ~4–5 | ~4 | ~4 |
+
+The rough-read ceiling is a **fixed O(h⁴) independent of S** (GL4/5/6 all
+rate ≈4.06 — the S+2 conjecture is rejected). Its source is the within-step
+response covariance to rough delayed forcing (the J construction's interior
+representation); lifting it needs second-level integrated DOFs — open.
+Mixed αβ×B (case d) shows O(h³); the pure cross (B=0) is clean O(h^2S).
+
 ## Corrected reference values (arbiter-confirmed)
 
 | problem | old archived "reference" | correct value |
