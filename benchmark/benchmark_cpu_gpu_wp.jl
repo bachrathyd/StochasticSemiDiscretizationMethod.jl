@@ -83,7 +83,32 @@ pb_v7 = Prob(2, Pm, τm,
 ρ_ref = abs(ρv7a-ρv7b) < 1e-7 ? ρv7b : ρ_sdm4
 @printf("ρ_ref = %.10f\n", ρ_ref)
 
-# ── sweep ──
+# ── sweep — outermost loop is the resolution; CSV+PNG re-saved after every
+# resolution level so the figure can be watched in real time ──
+function save_outputs(rows)
+    open(joinpath(@__DIR__,"cpu_vs_gpu_wp.csv"),"w") do io
+        println(io,"p,t_cpu,t_gpu,rho_cpu,rho_gpu,err")
+        for r in rows
+            @printf(io,"%d,%.6f,%.6f,%.12f,%.12f,%.6e\n",r.p,r.t_cpu,r.t_gpu,r.ρ_cpu,r.ρ_gpu,r.err)
+        end
+    end
+    errs =[max(r.err,1e-13) for r in rows]
+    tcpu =[max(r.t_cpu,1e-4) for r in rows]
+    tgpu =[max(r.t_gpu,1e-4) for r in rows]
+    p1 = plot(tcpu, errs, marker=:circle, label="CPU (MF)",
+              xscale=:log10, yscale=:log10,
+              xlabel="wall time [s]", ylabel="|ρ(H) − ρ_ref|",
+              title="Work-precision: CPU vs GPU\nfully periodic delay-stoch. Mathieu (d=2, q=2)",
+              legend=:topright)
+    plot!(p1, tgpu, errs, marker=:star5, label="GPU (zero-sync)")
+    p2 = plot([r.p for r in rows], tcpu, marker=:circle, label="CPU (MF)",
+              xscale=:log10, yscale=:log10, xlabel="p (steps / period)", ylabel="wall time [s]",
+              title="Time vs resolution", legend=:topleft)
+    plot!(p2, [r.p for r in rows], tgpu, marker=:star5, label="GPU (zero-sync)")
+    savefig(plot(p1, p2, layout=(1,2), size=(1400,560)),
+            joinpath(@__DIR__,"cpu_vs_gpu_wp.png"))
+end
+
 ps = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024]
 rows = NamedTuple[]
 for p in ps
@@ -96,28 +121,6 @@ for p in ps
     @printf("p=%5d  CPU %8.3fs  GPU %8.3fs  ρ=%.10f  err=%.2e  cpu/gpu-mismatch=%.1e %s\n",
             p, t_cpu, t_gpu, ρ_cpu, err, dis, dis < 1e-8 ? "OK" : "MISMATCH!")
     flush(stdout)
+    save_outputs(rows)         # figure updates after every resolution
 end
-
-open(joinpath(@__DIR__,"cpu_vs_gpu_wp.csv"),"w") do io
-    println(io,"p,t_cpu,t_gpu,rho_cpu,rho_gpu,err")
-    for r in rows
-        @printf(io,"%d,%.6f,%.6f,%.12f,%.12f,%.6e\n",r.p,r.t_cpu,r.t_gpu,r.ρ_cpu,r.ρ_gpu,r.err)
-    end
-end
-
-errs =[max(r.err,1e-13) for r in rows]
-tcpu =[max(r.t_cpu,1e-4) for r in rows]
-tgpu =[max(r.t_gpu,1e-4) for r in rows]
-p1 = plot(tcpu, errs, marker=:circle, label="CPU (MF)",
-          xscale=:log10, yscale=:log10,
-          xlabel="wall time [s]", ylabel="|ρ(H) − ρ_ref|",
-          title="Work-precision: CPU vs GPU\nfully periodic delay-stoch. Mathieu (d=2, q=2)",
-          legend=:topright)
-plot!(p1, tgpu, errs, marker=:star5, label="GPU (zero-sync)")
-p2 = plot([r.p for r in rows], tcpu, marker=:circle, label="CPU (MF)",
-          xscale=:log10, yscale=:log10, xlabel="p (steps / period)", ylabel="wall time [s]",
-          title="Time vs resolution", legend=:topleft)
-plot!(p2, [r.p for r in rows], tgpu, marker=:star5, label="GPU (zero-sync)")
-savefig(plot(p1, p2, layout=(1,2), size=(1400,560)),
-        joinpath(@__DIR__,"cpu_vs_gpu_wp.png"))
 println("wrote benchmark/cpu_vs_gpu_wp.csv and benchmark/cpu_vs_gpu_wp.png")
