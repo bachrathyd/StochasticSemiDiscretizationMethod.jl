@@ -52,10 +52,6 @@ fixPointOfMapping, spectralRadiusOfMapping,
 spectralRadiusOfMapping_MF,
 fixPointOfMapping_MF,
 spectralRadiusOfMapping_GPU,
-spectralRadiusOfMapping_GPU_v2,
-spectralRadiusOfMapping_GPU_v3,
-spectralRadiusOfMapping_GPU_v4,
-spectralRadiusOfMapping_GPU_v4g,
 spectralRadiusOfMapping_auto,
 fixPointOfMapping_GPU
 

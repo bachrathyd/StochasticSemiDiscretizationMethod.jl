@@ -235,3 +235,27 @@ scatter(stab_border_points...,xlim=(-1.,5.),ylim=(-1.5,1.4),
     guidefontsize=14,tickfont = font(10),markersize=2,markerstrokewidth=0)
 ```
 ![](./assets/StochLDOM2.png)
+
+## Multiplication-free and GPU evaluation of ρ(H)
+
+For large discretizations the dense second-moment mapping matrix `H` becomes
+prohibitively large. The **multiplication-free** path evaluates `H·m` directly from the
+per-step coefficients (never forming `H`), and a **GPU** implementation runs the whole
+Krylov iteration on the device ("Zero-Sync": coefficients are uploaded once, each
+matrix-vector product is a single cooperative kernel launch — or one CUDA-graph replay
+on devices without cooperative-launch support — and only the Floquet multiplier is
+downloaded).
+
+```julia
+rst = StochasticSemiDiscretizationMethod.calculateResults(lddep, method, τmax, n_steps=p)
+dm  = DiscreteMapping_M2_MF(rst)
+
+ρ = spectralRadiusOfMapping_MF(dm)    # CPU, multiplication-free
+ρ = spectralRadiusOfMapping_GPU(dm)   # GPU (requires a CUDA-capable device)
+ρ = spectralRadiusOfMapping_auto(dm)  # picks CPU below the measured crossover (D≈10⁴), GPU above
+
+m★ = fixPointOfMapping_GPU(dm_additive)  # stationary 1st+2nd moments on the GPU
+```
+
+CPU and GPU agree to ~1e-15; the GPU is faster from state sizes `D ≈ 10⁴` upward
+(see `benchmark/benchmark_cpu_gpu.jl` and `MF_SSD_project.md`).

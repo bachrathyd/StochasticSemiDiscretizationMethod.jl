@@ -1,0 +1,9 @@
+# machine-local
+LocalPreferences.toml
+.claude/
+.vscode/
+
+# transient benchmark/run outputs (timestamped)
+*_2026*.csv
+*_2026*.png
+_bench*.txt
