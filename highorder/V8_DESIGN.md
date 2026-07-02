@@ -1,5 +1,15 @@
 # v8 design note — integrated-history DOFs for rough delayed drift reads
 
+> **STATUS (2026-07-02, implemented & validated):** scalar prototype
+> (`cov_colloc_v8_scalar.jl`) and matrix engine (`cov_colloc_v8.jl`, d≥1,
+> time-dependent B via reading-step-weighted J DOFs) both built; full ladder
+> in `v8m_validate/targets/highorder.jl`. Outcome: smooth-read class reaches
+> **GL4 = O(h⁸), GL5 ≥ O(h¹⁰)**; rough-read class lifts from v7's O(h²) to a
+> **fixed O(h⁴) independent of S** (S+2 conjecture rejected by GL4/5/6 all
+> measuring ≈4.06). Validation ladder items 1–4 below: all PASS (case d keeps
+> an O(h³) term; pure αβ cross clean). Next frontier: second-level integrated
+> DOFs for the within-step response covariance to rough delayed forcing.
+
 ## Motivation (measured, v7_isolate.jl)
 
 v7 caps at O(h²) for every GL order exactly when the delayed **drift** read
