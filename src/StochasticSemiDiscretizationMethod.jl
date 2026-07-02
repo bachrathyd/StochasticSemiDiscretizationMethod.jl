@@ -36,6 +36,7 @@ include("functions_method.jl")
 include("functions_stoch_utilities.jl")
 include("functions_discretization.jl")
 include("functions_multifree.jl")
+include("functions_multifree_factored.jl")
 include("functions_gpu.jl")
 
 export  SemiDiscretization, NumericSD,
@@ -51,6 +52,8 @@ MxToCovVec, VecToCovMx,
 fixPointOfMapping, spectralRadiusOfMapping,
 spectralRadiusOfMapping_MF,
 fixPointOfMapping_MF,
+spectralRadiusOfMapping_MF_factored,
+fixPointOfMapping_MF_factored,
 spectralRadiusOfMapping_GPU,
 spectralRadiusOfMapping_auto,
 fixPointOfMapping_GPU
