@@ -31,7 +31,11 @@ function chain(n; k0=3.0, εk=0.8, ζ=0.05, b0=0.4, αs=0.25)
 end
 
 timeit(f) = (t0=time(); v=f(); (time()-t0, v))
-best2(f) = (t,v=timeit(f); t2,_=timeit(f); (min(t,t2),v))
+function best2(f)
+    t, v = timeit(f)
+    t2, _ = timeit(f)
+    return (min(t, t2), v)
+end
 
 # dense path builds coefficients via SMatrix — attempt only up to this d
 const DENSE_DMAX = 10
