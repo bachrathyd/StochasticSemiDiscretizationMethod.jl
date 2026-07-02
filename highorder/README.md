@@ -116,11 +116,18 @@ Measured order summary (ρ(H)):
 | smooth-read (Mathieu class, any noise mix) | 4 | 6 | **8** | ≥10 (floor) |
 | rough-read (delayed drift reads a noise-carrying component) | 4 | ~4–5 | ~4 | ~4 |
 
-The rough-read ceiling is a **fixed O(h⁴) independent of S** (GL4/5/6 all
-rate ≈4.06 — the S+2 conjecture is rejected). Its source is the within-step
-response covariance to rough delayed forcing (the J construction's interior
-representation); lifting it needs second-level integrated DOFs — open.
-Mixed αβ×B (case d) shows O(h³); the pure cross (B=0) is clean O(h^2S).
+**REFINED (hard-PD run, v8ibp_hard.jl):** the rough-read O(h⁴) cap belongs to
+FIRST-ORDER systems whose delayed drift reads the rough component ITSELF
+(scalar cases a/c/d: GL4/5/6 all rate ≈4.06, S-independent). For MECHANICAL
+systems under delayed VELOCITY (D/PD) feedback, v8's integrated-history J-DOFs
+deliver the FULL nominal order: hard PD-Mathieu (strong gains+noise, reference
+certified to 9.4e-13 vs the independent arbiter) measures v8-direct GL3 rates
+6.06/6.00/5.97/6.07 → 8e-12 at p=24; v7 (sampling) collapses to clean 2.00 on
+the same problem. IBP (cov_colloc_v8_ibp.jl, posmap form) keeps the order and
+reduces constants 2–3× (GL4+IBP: 1e-9 at p=4); the block-local IBP form is the
+designated treatment for the remaining scalar/self-read O(h⁴) class (open).
+Mixed αβ×B (case d, scalar) shows O(h³); the pure cross (B=0) is clean O(h^2S).
+Figure: out_pd_orders.png (also in the journal paper).
 
 ## Corrected reference values (arbiter-confirmed)
 
