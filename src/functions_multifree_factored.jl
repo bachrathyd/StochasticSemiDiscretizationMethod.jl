@@ -302,31 +302,46 @@ function LinearAlgebra.mul!(y::AbstractVector, op::M1FactoredOperator, x::Abstra
     y .= apply_mapping_M1_factored!(op.ws, op.cf, op.rst, x, include_additive=false)
 end
 
-function spectralRadiusOfMapping_MF_factored(dm::stDiscreteMapping_M2_MF; args...)
-    d = size(dm.coeffs.det[1][1][1], 1)
-    r = div(dm.rst.n, d) - 1
+# rst-first API: works directly from the Result, so it NEVER builds the dense
+# d²×d² coefficients (the DiscreteMapping_M2_MF constructor's get_all_coefficients
+# blows the StaticArrays "expression too large" limit at d ≳ 30). This is the
+# path that actually reaches 10-/100-DoF.
+function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d}; args...) where d
+    r = div(rst.n, d) - 1
     D = CovVecIdx((r+1)*d).sectionStarts[end]
-    cf = get_factored_coefficients(dm.rst; include_additive=false)
+    cf = get_factored_coefficients(rst; include_additive=false)
     ws = MFFactoredWorkspace(d, r)
-    op = MFFactoredOperator(cf, dm.rst, D, ws)
+    op = MFFactoredOperator(cf, rst, D, ws)
     vals, _, _ = eigsolve(op, rand(D), 1, :LM; args...)
     return abs(vals[1])
 end
+# convenience: build the Result and solve, bypassing dense coefficients entirely
+function spectralRadiusOfMapping_MF_factored(LDDEP::LDDEProblem, method::DiscretizationMethod,
+                                             DiscretizationLength::Real; n_steps=nothing, args...)
+    rst = n_steps === nothing ?
+        calculateResults(LDDEP, method, DiscretizationLength) :
+        calculateResults(LDDEP, method, DiscretizationLength; n_steps=n_steps)
+    spectralRadiusOfMapping_MF_factored(rst; args...)
+end
+# delegate the dm form (small d convenience) to the rst path
+spectralRadiusOfMapping_MF_factored(dm::stDiscreteMapping_M2_MF; args...) =
+    spectralRadiusOfMapping_MF_factored(dm.rst; args...)
 
-function fixPointOfMapping_MF_factored(dm::stDiscreteMapping_M2_MF; args...)
-    d = size(dm.coeffs.det[1][1][1], 1)
-    r = div(dm.rst.n, d) - 1
+function fixPointOfMapping_MF_factored(rst::AbstractResult{d}; args...) where d
+    r = div(rst.n, d) - 1
     D1 = (r+1)*d
     D2 = CovVecIdx(D1).sectionStarts[end]
-    cf = get_factored_coefficients(dm.rst; include_additive=true)
+    cf = get_factored_coefficients(rst; include_additive=true)
     ws = MFFactoredWorkspace(d, r)
 
-    op1 = M1FactoredOperator(cf, dm.rst, D1, ws)
-    k1 = apply_mapping_M1_factored!(ws, cf, dm.rst, zeros(D1), include_additive=true)
+    op1 = M1FactoredOperator(cf, rst, D1, ws)
+    k1 = apply_mapping_M1_factored!(ws, cf, rst, zeros(D1), include_additive=true)
     v_star = gmres(IMinusPhiOperator(op1), k1; reltol=1e-15, args...)
 
-    k2 = apply_mapping_M2_factored!(ws, cf, dm.rst, zeros(D2), v_star, include_additive=true)
-    op2 = MFFactoredOperator(cf, dm.rst, D2, ws)
+    k2 = apply_mapping_M2_factored!(ws, cf, rst, zeros(D2), v_star, include_additive=true)
+    op2 = MFFactoredOperator(cf, rst, D2, ws)
     m_star = gmres(IMinusPhiOperator(op2), k2; reltol=1e-15, args...)
     return m_star
 end
+fixPointOfMapping_MF_factored(dm::stDiscreteMapping_M2_MF; args...) =
+    fixPointOfMapping_MF_factored(dm.rst; args...)

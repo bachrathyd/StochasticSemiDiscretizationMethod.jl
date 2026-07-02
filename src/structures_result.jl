@@ -37,12 +37,16 @@ function Result(LDDEP::LDDEProblem{d,AT,BT, cT}, method::DiscretizationMethod{fT
     subMXs = [Vector{SubMX{eltype(A_avgs)}}(undef, n_steps) for i in 1:(length(LDDEP.Bs) + 1)] # []
     # stsubMXs = [Vector{stSubMX{SizedArray{Tuple{d,d},SArray{Tuple{K},eltype(eltype(A_avgs)),1,K},2,2}}}(undef,n_steps) for i in 1:(length(LDDEP.αs)+length(LDDEP.βs))]
     s_type = SArray{Tuple{K},eltype(eltype(A_avgs)),1,K}
-    stsubMXs = [Vector{stSubMX{SizedArray{Tuple{d,d},s_type,2,2,Matrix{s_type}}}}(undef,n_steps) for i in 1:(length(LDDEP.αs)+length(LDDEP.βs))]
+    # Abstract (UnionAll) element type: the discretization builders return a
+    # SizedArray-backed stSubMX for small d but fall back to a plain-Matrix one
+    # at d ≥ 10 (StaticArrays' 100-element cutoff). Accept either so the
+    # pipeline scales to large d (10-/100-DoF) without a convert error.
+    stsubMXs = [Vector{stSubMX{M} where {M<:AbstractMatrix{s_type}}}(undef,n_steps) for i in 1:(length(LDDEP.αs)+length(LDDEP.βs))]
 
     if calculate_additive
         subVs = Vector{SubV{SVector{d,eltype(eltype(A_avgs))}}}(undef, n_steps) # []
         s_type = SArray{Tuple{K},Float64,1,K}
-        stsubVs = Vector{Vector{stSubV{SizedArray{Tuple{d},s_type,1,1,Vector{s_type}}}}}(undef, LDDEP.w);
+        stsubVs = Vector{Vector{stSubV{V} where {V<:AbstractVector{s_type}}}}(undef, LDDEP.w);
         # stSubV(LDDEP.dnoise.delayMX.τ.τ.ws, [Vector{SubV}(undef,n_steps) for i in LDDEP.dnoise.delayMX.τ.τ.ws]) # []
     else
         subVs = Vector{SubV{SVector{d,eltype(eltype(A_avgs))}}}(undef, 0)
