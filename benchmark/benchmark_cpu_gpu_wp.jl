@@ -87,6 +87,7 @@ pb_v7 = Prob(2, Pm, τm,
 # resolution level so the figure can be watched in real time ──
 function save_outputs(rows)
     open(joinpath(@__DIR__,"cpu_vs_gpu_wp.csv"),"w") do io
+        @printf(io,"# rho_ref: %.12f\n", ρ_ref)
         println(io,"p,t_cpu,t_gpu,rho_cpu,rho_gpu,err")
         for r in rows
             @printf(io,"%d,%.6f,%.6f,%.12f,%.12f,%.6e\n",r.p,r.t_cpu,r.t_gpu,r.ρ_cpu,r.ρ_gpu,r.err)
@@ -109,7 +110,7 @@ function save_outputs(rows)
             joinpath(@__DIR__,"cpu_vs_gpu_wp.png"))
 end
 
-ps = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024]
+ps = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096]
 rows = NamedTuple[]
 for p in ps
     dm = mapping(p)

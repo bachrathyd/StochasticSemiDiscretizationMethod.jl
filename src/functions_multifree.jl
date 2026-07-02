@@ -210,102 +210,125 @@ end
 
 Applies the second-moment mapping using the Multiplication-Free method.
 """
+# Size-gated threading: fine-grained per-step loops only benefit from threads
+# when the window is large; below the threshold the task-spawn overhead
+# (∝ nthreads, paid 2p times per mapping) exceeds the work.
+@inline function _tforeach(f::F, rng; minlen::Int=512) where {F}
+    if length(rng) >= minlen && Threads.nthreads() > 1
+        Threads.@threads :static for x in rng
+            f(x)
+        end
+    else
+        for x in rng
+            f(x)
+        end
+    end
+    return nothing
+end
+
 function apply_mapping_M2_MF!(ws::MFWorkspace{d, L}, rst::AbstractResult{d}, coeffs::MFCoefficients{d, L, L2, Ld}, m_in::AbstractVector, v_in::AbstractVector; include_additive=false) where {d, L, L2, Ld}
     r = div(rst.n, d) - 1
     p = rst.n_steps
     idx = StochasticSemiDiscretizationMethod.CovVecIdx((r + 1) * d)
-    
+
     C = ws.C
     v = ws.v
     C_next_m = ws.C_next_m
     c_idx(n) = mod(n, r+1) + 1
-    
-    # 0. Initialize
-    for i in 0:r
-        v[c_idx(-i)] = SVector{d, Float64}(v_in[i*d+1:(i+1)*d])
+
+    # 0. Initialize (threaded over window blocks; allocation-free SMatrix build)
+    _tforeach(0:r) do i
+        v[c_idx(-i)] = SVector{d, Float64}(ntuple(q -> v_in[i*d+q], Val(d)))
+        ci = c_idx(-i)
         for j in 0:r
-            Mat = zeros(MMatrix{d, d, Float64, L})
-            for r_row in 1:d, r_col in 1:d
-                Mat[r_row, r_col] = m_in[idx(i*d + r_row, j*d + r_col)]
-            end
-            C[c_idx(-i), c_idx(-j)] = SMatrix{d,d,Float64,L}(Mat)
+            Mat = SMatrix{d,d,Float64,L}(ntuple(q -> begin
+                r_row = (q-1) % d + 1; r_col = (q-1) ÷ d + 1
+                m_in[idx(i*d + r_row, j*d + r_col)]
+            end, Val(L)))
+            C[ci, c_idx(-j)] = Mat
         end
     end
-    
+
     # 1. Propagate
     for n in 0:p-1
         next_n = n + 1
         det_step = coeffs.det[next_n]
         stoch_op = coeffs.stoch_op[next_n]
         detV = coeffs.detV[next_n]
-        
+
         # v(n+1)
-        v_next_M = zeros(MVector{d, Float64})
+        v_next_S = zero(SVector{d, Float64})
         for (A, k) in det_step
-            v_next_M .+= A * v[c_idx(n-k)]
+            v_next_S += A * v[c_idx(n-k)]
         end
         if include_additive
-            v_next_M .+= detV
+            v_next_S += detV
         end
-        v_next_S = SVector{d, Float64}(v_next_M)
-        
-        # C(n+1, m)
-        for (i, m) in enumerate(n-r:n)
-            res = zeros(MMatrix{d, d, Float64, L})
+
+        # C(n+1, m) — stack-allocated accumulation. NOTE: deliberately serial —
+        # per-step work is O(r·d³) ≈ tens of µs for d=2, far below the
+        # fork-join barrier cost of a threaded region (measured 3× slowdown
+        # when threaded on a 36-core box). Only per-APPLY O(r²) loops thread.
+        for i in 1:(r+1)
+            m = n - r + (i - 1)
+            cm = c_idx(m)
+            res = zero(SMatrix{d, d, Float64, L})
             for (A, k) in det_step
-                res .+= A * C[c_idx(n-k), c_idx(m)]
+                res += A * C[c_idx(n-k), cm]
             end
             if include_additive
-                res .+= detV * v[c_idx(m)]'
+                res += detV * v[cm]'
             end
-            C_next_m[i] = SMatrix{d,d,Float64,L}(res)
+            C_next_m[i] = res
         end
-        
+
         # C(n+1, n+1)
-        res_diag = zeros(MMatrix{d, d, Float64, L})
+        res_diag = zero(SMatrix{d, d, Float64, L})
         for (Ak, k) in det_step, (Al, l) in det_step
-            res_diag .+= Ak * C[c_idx(n-k), c_idx(n-l)] * Al'
+            res_diag += Ak * C[c_idx(n-k), c_idx(n-l)] * Al'
         end
-        
+
         for (E_mat, k, l) in stoch_op
             Ckl_vec = SVector{L, Float64}(C[c_idx(n-k), c_idx(n-l)])
             res_vec = E_mat * Ckl_vec
-            res_diag .+= SMatrix{d, d, Float64, L}(res_vec)
+            res_diag += SMatrix{d, d, Float64, L}(res_vec)
         end
-        
+
         if include_additive
             Fv = v_next_S - detV
-            res_diag .+= detV * Fv' + Fv * detV' + detV * detV'
-            res_diag .+= coeffs.stochV[next_n]
+            res_diag += detV * Fv' + Fv * detV' + detV * detV'
+            res_diag += coeffs.stochV[next_n]
             for (E_Gg_mat, k, w) in coeffs.stochGV[next_n]
                 term_vec = E_Gg_mat * v[c_idx(n-k)]
                 term = SMatrix{d, d, Float64, L}(term_vec)
-                res_diag .+= term + term'
+                res_diag += term + term'
             end
         end
-        
-        C_final_diag = SMatrix{d,d,Float64,L}(res_diag)
-        
-        # Update
+
+        # Update (serial — same granularity argument as the compute loop)
         v[c_idx(next_n)] = v_next_S
-        for (i, m) in enumerate(n-r:n)
-            C[c_idx(next_n), c_idx(m)] = C_next_m[i]
-            C[c_idx(m), c_idx(next_n)] = C_next_m[i]'
+        cn = c_idx(next_n)
+        for i in 1:(r+1)
+            m = n - r + (i - 1)
+            cm = c_idx(m)
+            C[cn, cm] = C_next_m[i]
+            C[cm, cn] = C_next_m[i]'
         end
-        C[c_idx(next_n), c_idx(next_n)] = C_final_diag
+        C[cn, cn] = res_diag
     end
-    
-    # 2. Extract
+
+    # 2. Extract (threaded over rows)
     m_out = zeros(length(m_in))
-    for i in 0:r, j in 0:r
+    _tforeach(0:r) do i
         p_i_idx = c_idx(p-i)
-        p_j_idx = c_idx(p-j)
-        Mat = C[p_i_idx, p_j_idx]
-        for r_row in 1:d, r_col in 1:d
-            vi = i*d + r_row
-            vj = j*d + r_col
-            if vi <= vj
-                m_out[idx(vi, vj)] = Mat[r_row, r_col]
+        for j in 0:r
+            Mat = C[p_i_idx, c_idx(p-j)]
+            for r_row in 1:d, r_col in 1:d
+                vi = i*d + r_row
+                vj = j*d + r_col
+                if vi <= vj
+                    m_out[idx(vi, vj)] = Mat[r_row, r_col]
+                end
             end
         end
     end

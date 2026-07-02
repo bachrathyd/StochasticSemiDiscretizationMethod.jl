@@ -858,6 +858,152 @@ function _build_v4_graph(op::MFGPUMappingOperator_v4, x_buf::CuVector{Float64},
 end
 
 # ============================================================
+# V5 cooperative kernel — ONE grid sync per step (vs 2 in v3).
+# The circular buffer has r+2 slots: the new block's slot c5(n+1) is never
+# read while computing step n (c5(n+1)==c5(n−k) would need k ≡ r+1 mod r+2,
+# impossible for delay offsets k ≤ r), so results are written directly —
+# no staging buffer, no writeback phase. At large p the cooperative path is
+# grid-sync-bound, so this nearly halves the kernel time.
+# ============================================================
+
+function kernel_M2_MF_v5!(
+    m_out, m_in,
+    C,                                  # d×d×(r+2)×(r+2)
+    det_A, det_k, num_det,
+    stoch_E, stoch_k, stoch_l, num_stoch,
+    p::Int32, r::Int32, d::Int32,
+    idx_sectionStarts
+)
+    @inbounds begin
+        tid    = Int32(threadIdx().x) + Int32((blockIdx().x - Int32(1)) * blockDim().x)
+        stride = Int32(blockDim().x) * Int32(gridDim().x)
+        rp1    = r + Int32(1)
+        rp2    = r + Int32(2)
+        L      = d * d
+        total_C     = rp1 * rp1 * L
+        total_cross = rp1 * L
+
+        grid = _cg_this_grid()
+
+        # init: logical block i (0..r) ↔ slot gpu_c_idx_v2(-i, rp2)
+        for flat in (tid - Int32(1)):stride:(total_C - Int32(1))
+            idx_j  = flat ÷ (rp1 * L)
+            rem1   = flat - idx_j * (rp1 * L)
+            idx_i  = rem1 ÷ L
+            rem2   = rem1 - idx_i * L
+            col    = rem2 ÷ d + Int32(1)
+            row    = rem2 - (col - Int32(1)) * d + Int32(1)
+            phys_i = gpu_c_idx_v2(-idx_i, rp2)
+            phys_j = gpu_c_idx_v2(-idx_j, rp2)
+            vi = idx_i * d + row
+            vj = idx_j * d + col
+            min_v  = vi < vj ? vi : vj
+            max_v  = vi > vj ? vi : vj
+            diff   = max_v - min_v
+            C[row, col, phys_i, phys_j] = m_in[idx_sectionStarts[diff + Int32(1)] + min_v]
+        end
+
+        _cg_sync(grid)
+
+        for n in Int32(0):p - Int32(1)
+            next_n    = n + Int32(1)
+            next_phys = gpu_c_idx_v2(next_n, rp2)
+            nd = num_det[next_n]
+            ns = num_stoch[next_n]
+
+            # cross terms — direct write (slot next_phys is not read this step)
+            for flat in (tid - Int32(1)):stride:(total_cross - Int32(1))
+                m_offset   = flat ÷ L
+                rem        = flat - m_offset * L
+                col        = rem ÷ d + Int32(1)
+                row        = rem - (col - Int32(1)) * d + Int32(1)
+                idx_m_phys = gpu_c_idx_v2((n - r) + m_offset, rp2)
+                val = 0.0
+                for i in Int32(1):nd
+                    idx_nk = gpu_c_idx_v2(n - det_k[i, next_n], rp2)
+                    for s in Int32(1):d
+                        val += det_A[row, s, i, next_n] * C[s, col, idx_nk, idx_m_phys]
+                    end
+                end
+                C[row, col, next_phys, idx_m_phys] = val
+                C[col, row, idx_m_phys, next_phys] = val
+            end
+
+            # diagonal — direct write
+            for flat in (tid - Int32(1)):stride:(L - Int32(1))
+                col = flat ÷ d + Int32(1)
+                row = flat - (col - Int32(1)) * d + Int32(1)
+                lin = row + (col - Int32(1)) * d
+                val = 0.0
+                for i in Int32(1):nd
+                    idx_nk = gpu_c_idx_v2(n - det_k[i, next_n], rp2)
+                    for j in Int32(1):nd
+                        idx_nl = gpu_c_idx_v2(n - det_k[j, next_n], rp2)
+                        for s in Int32(1):d
+                            for t in Int32(1):d
+                                val += det_A[row, s, i, next_n] * C[s, t, idx_nk, idx_nl] * det_A[col, t, j, next_n]
+                            end
+                        end
+                    end
+                end
+                for i in Int32(1):ns
+                    idx_nk = gpu_c_idx_v2(n - stoch_k[i, next_n], rp2)
+                    idx_nl = gpu_c_idx_v2(n - stoch_l[i, next_n], rp2)
+                    for s in Int32(1):d
+                        for t in Int32(1):d
+                            val += stoch_E[lin, s + (t - Int32(1)) * d, i, next_n] * C[s, t, idx_nk, idx_nl]
+                        end
+                    end
+                end
+                C[row, col, next_phys, next_phys] = val
+            end
+
+            _cg_sync(grid)
+        end
+
+        # extract
+        for flat in (tid - Int32(1)):stride:(total_C - Int32(1))
+            idx_j  = flat ÷ (rp1 * L)
+            rem1   = flat - idx_j * (rp1 * L)
+            idx_i  = rem1 ÷ L
+            rem2   = rem1 - idx_i * L
+            col    = rem2 ÷ d + Int32(1)
+            row    = rem2 - (col - Int32(1)) * d + Int32(1)
+            vi = idx_i * d + row
+            vj = idx_j * d + col
+            if vi <= vj
+                val  = C[row, col, gpu_c_idx_v2(p - idx_i, rp2), gpu_c_idx_v2(p - idx_j, rp2)]
+                diff = vj - vi
+                m_out[idx_sectionStarts[diff + Int32(1)] + vi] = val
+            end
+        end
+    end
+    return nothing
+end
+
+struct MFGPUMappingOperator_v5 <: AbstractMatrix{Float64}
+    coeffs::MFGPUCoefficients
+    D::Int; r::Int; d::Int; p::Int; n_sm::Int
+    C::CuArray{Float64,4}                       # (d,d,r+2,r+2)
+    idx_sectionStarts::CuArray{Int32,1}
+end
+Base.size(op::MFGPUMappingOperator_v5) = (op.D, op.D)
+Base.size(op::MFGPUMappingOperator_v5, i::Int) = i <= 2 ? op.D : 1
+Base.eltype(op::MFGPUMappingOperator_v5) = Float64
+LinearAlgebra.issymmetric(op::MFGPUMappingOperator_v5) = false
+LinearAlgebra.ishermitian(op::MFGPUMappingOperator_v5) = false
+
+function LinearAlgebra.mul!(y::AbstractVector, op::MFGPUMappingOperator_v5, x::AbstractVector)
+    @cuda threads=256 blocks=op.n_sm cooperative=true kernel_M2_MF_v5!(
+        y, x, op.C,
+        op.coeffs.det_A, op.coeffs.det_k, op.coeffs.num_det,
+        op.coeffs.stoch_E, op.coeffs.stoch_k, op.coeffs.stoch_l, op.coeffs.num_stoch,
+        Int32(op.p), Int32(op.r), Int32(op.d), op.idx_sectionStarts
+    )
+    return y
+end
+
+# ============================================================
 # User API
 #
 # Zero-Sync policy: coefficients are uploaded to the GPU once, the whole
@@ -884,11 +1030,17 @@ function _gpu_krylovdim(D::Int, krylovdim::Int)
 end
 
 # The homogeneous second-moment mapping as a device-resident linear operator:
-# cooperative single-launch kernel when supported, CUDA-graph replay otherwise.
+# cooperative single-launch kernel when supported (v5: one grid sync/step),
+# CUDA-graph replay otherwise.
 function _make_m2_gpu_operator(gpu_coeffs::MFGPUCoefficients, D, r, d, p, ws)
     n_sm = _gpu_n_sm()
     if _gpu_coop_supported()
-        return MFGPUMappingOperator_v3(gpu_coeffs, D, r, d, p, n_sm, ws)
+        C5 = CUDA.zeros(Float64, d, d, r+2, r+2)
+        # Right-size the cooperative grid: the per-step parallel width is
+        # (r+1)·d² elements; extra blocks only add grid-sync latency (matters
+        # on large-SM devices like A100 where n_sm ≫ needed blocks).
+        nblk = clamp(cld((r+1)*d*d, 256), 1, n_sm)
+        return MFGPUMappingOperator_v5(gpu_coeffs, D, r, d, p, nblk, C5, ws.idx_sectionStarts)
     else
         x_buf = CUDA.zeros(Float64, D)
         y_buf = CUDA.zeros(Float64, D)
