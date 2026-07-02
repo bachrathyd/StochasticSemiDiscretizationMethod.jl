@@ -1,10 +1,20 @@
 # High-order stochastic second-moment IRK inside StochasticSemiDiscretizationMethod.jl
 
-> **Note (2026-07-02):** the scratch scripts referenced below (`scratch_*.jl`,
+> **Note (2026-07-02, morning):** the scratch scripts referenced below (`scratch_*.jl`,
 > `moment_colloc.jl`, `benchmark_mf_v6.jl`, `cov_colloc_v6.jl`, …) were archived to
 > `demonstration/_highorder_research/`. Status: the moment-equation collocation shows
 > the predicted superconvergent *order*, but the reduced (M,P) prototype converges to a
 > **wrong value** (fails the noise-off ρ(Φ)² gate) — see `demonstration/README.md`.
+>
+> **RESOLVED (2026-07-02, afternoon) — see `highorder/README.md`.** The v6 O(h²) cap
+> was the missing intra-block two-time noise covariance; the causal fill in
+> `highorder/cov_colloc_v7.jl` restores full superconvergence on the target
+> (mechanical/Mathieu) class — GL2 O(h⁴), GL3 converged to 1e-10 by p=12 on the very
+> benchmark where v6 lost to SDM. Values independently confirmed by a fine-grid
+> arbiter; three archived reference values were themselves wrong by ~1e-5 (unconverged
+> SDM q=2 — its measured order is ≈1, not its nominal). Remaining known limit: O(h²)
+> when the delayed drift reads a Brownian-rough component (scalar B≠0+noise); v8
+> sketch (stage-weighted history integrals) documented in highorder/README.md.
 
 ## Context / problem
 
