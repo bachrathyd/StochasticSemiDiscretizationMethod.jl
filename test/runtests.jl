@@ -100,6 +100,25 @@ function tests()
             @test isapprox(spectralRadiusOfMapping_GPU(dm2),
                            spectralRadiusOfMapping_MF(dm2); rtol=1e-8)
 
+            # delay-stochastic Mathieu with ALL matrices time-periodic
+            # (A(t), B(t), α(t), β(t); P=4π, τ=2π) — the representative case:
+            # every per-step coefficient tensor differs, so the whole GPU
+            # coefficient pipeline is exercised.
+            AMxfun(t) = @SMatrix [0. 1.; -(3.0 + 2.0*cos(0.5t)) -0.2]
+            BMxfun(t) = @SMatrix [0. 0.; 0.5*(1+0.4cos(0.5t)) 0.]
+            αMxfun(t) = @SMatrix [0. 0.; -0.1*(3.0 + 2.0*cos(0.5t)) -0.02]
+            βMxfun(t) = @SMatrix [0. 0.; 0.05*(1+0.4cos(0.5t)) 0.]
+            mathieu_lddep = LDDEProblem(
+                ProportionalMX(AMxfun), [DelayMX(2π, BMxfun)],
+                [stCoeffMX(1, ProportionalMX(αMxfun))],
+                [stCoeffMX(1, DelayMX(2π, βMxfun))],
+                Additive(2), [stAdditive(1, Additive(@SVector [0., 0.]))])
+            rst4 = StochasticSemiDiscretizationMethod.calculateResults(
+                mathieu_lddep, SemiDiscretization(2, 4π/24), 2π, n_steps=24)
+            dm4 = DiscreteMapping_M2_MF(rst4)
+            @test isapprox(spectralRadiusOfMapping_GPU(dm4),
+                           spectralRadiusOfMapping_MF(dm4); rtol=1e-8)
+
             # stationary second moment (additive noise)
             rst3 = StochasticSemiDiscretizationMethod.calculateResults(
                 hayes_lddep, SemiDiscretization(0, 0.1), 1.,
