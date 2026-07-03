@@ -45,11 +45,8 @@ for name in order
     idx = findall(==(name), names)
     isempty(idx) && continue
     p = ps[idx]; e = errs[idx]
-    # truncate two points after first drop below the floor
-    ic = findfirst(<(FLOOR), e)
-    if ic !== nothing
-        p = p[1:min(end, ic+1)]; e = e[1:min(end, ic+1)]
-    end
+    # show all collected points (runs already stop ~5 past the floor) so the
+    # saturation plateau is fully visible
     ls = startswith(name,"IBP") ? :dash : :solid
     mk = startswith(name,"SDM") ? :circle : (startswith(name,"IBP") ? :diamond : :utriangle)
     plot!(plt, p, max.(e,4e-13), marker=mk, markersize=4.5, markerstrokewidth=0.4,

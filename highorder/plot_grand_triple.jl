@@ -29,11 +29,8 @@ function load(csv)
     names=String.(raw[:,1]); ps=Int.(raw[:,2]); err=Float64.(raw[:,3]); t=Float64.(raw[:,4])
     Dict(n => (p=ps[names.==n], e=err[names.==n], t=t[names.==n]) for n in unique(names))
 end
-# truncate a curve a couple points past the first sub-floor error
-function trunc_floor(p,e,t,flr)
-    ic=findfirst(<(flr), e)
-    ic===nothing ? (p,e,t) : (p[1:min(end,ic+1)], e[1:min(end,ic+1)], t[1:min(end,ic+1)])
-end
+# show all collected points (runs stop ~5 past the floor) so saturation shows
+trunc_floor(p,e,t,flr) = (p,e,t)
 
 panels = Plots.Plot[]
 for (ri,row) in enumerate(ROWS)

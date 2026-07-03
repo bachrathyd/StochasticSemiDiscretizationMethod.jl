@@ -86,7 +86,7 @@ function redraw()
     end
 end
 
-ps_all = [4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,
+ps_all = [2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,
           160,192,224,256,320,384,448,512,640,768,896,1024,
           1280,1536,1792,2048,2560,3072,3584,4096]
 for p in ps_all
@@ -99,8 +99,9 @@ for p in ps_all
         flush(stdout)
         redraw()
         t > TCAP && push!(stopped, name)
-        if length(d.errs) ≥ 3 && all(e -> e < FLOOR, d.errs[end-2:end])
-            push!(stopped, name); println("  → $name reached floor"); flush(stdout)
+        # keep ~5 points past the floor so the saturation plateau is visible
+        if count(e -> e < FLOOR, d.errs) ≥ 5
+            push!(stopped, name); println("  → $name saturated on floor"); flush(stdout)
         end
     end
     length(stopped) == length(methods) && break

@@ -102,8 +102,9 @@ function redraw(; final=false)
     plt
 end
 
-# dense grid: ~10 points per decade
-ps_all = [4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,
+# dense grid: start low (p=2,3) so the high-order slopes are visible before
+# they hit the floor; ~10 points per decade above.
+ps_all = [2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,
           160,192,224,256,320,384,448,512,640,768,896,1024,
           1280,1536,1792,2048,2560,3072,3584,4096]
 for p in ps_all
@@ -117,9 +118,10 @@ for p in ps_all
         flush(stdout)
         redraw()                                     # live update after EVERY point
         t > TCAP && push!(stopped, name)
-        if length(d.errs) ≥ 3 && all(e -> e < FLOOR, d.errs[end-2:end])
+        # keep ~5 points past the floor so the saturation plateau is visible
+        if count(e -> e < FLOOR, d.errs) ≥ 5
             push!(stopped, name)
-            println("  → $name reached the noise floor"); flush(stdout)
+            println("  → $name saturated on the noise floor"); flush(stdout)
         end
     end
     length(stopped) == length(methods) && break

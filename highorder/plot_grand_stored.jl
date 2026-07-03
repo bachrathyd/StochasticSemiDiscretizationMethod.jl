@@ -31,10 +31,8 @@ function load(csv)
     names=String.(raw[:,1]); ps=Int.(raw[:,2]); err=Float64.(raw[:,3])
     Dict(n => (p=ps[names.==n], e=err[names.==n]) for n in unique(names))
 end
-function trunc_floor(x,e,flr)
-    ic=findfirst(<(flr), e)
-    ic===nothing ? (x,e) : (x[1:min(end,ic+2)], e[1:min(end,ic+2)])
-end
+# show all collected points (runs stop ~5 past the floor) so saturation shows
+trunc_floor(x,e,flr) = (x,e)
 
 panels = Plots.Plot[]
 for (ri,row) in enumerate(ROWS)
