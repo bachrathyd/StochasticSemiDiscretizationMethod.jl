@@ -56,6 +56,7 @@ struct StepV8
     Yrows::Matrix{Float64}         # Sd×W stage-value rows (for Egg)
     Dk::Vector{Matrix{Float64}}    # d×W delayed node reads (for Egg)
     As::Vector{Matrix{Float64}}; αs::Vector{Matrix{Float64}}; βs::Vector{Matrix{Float64}}
+    σs::Vector{Matrix{Float64}}    # additive-noise loading at the S stage points (d×m each)
     Bf::Function                   # s ∈ [0,h] ↦ B(t_{n+r}+s) (weights of the NEW J's)
     a::Matrix{Float64}; b::Vector{Float64}; c::Vector{Float64}
     lcoef::Vector{Vector{Float64}}
@@ -68,6 +69,7 @@ function step_v8m(pb::Prob, a, b, c, h, t_n, r)
     As=[Matrix(pb.A(t_n+c[i]*h)) for i in 1:S]
     αs=[Matrix(pb.α(t_n+c[i]*h)) for i in 1:S]
     βs=[Matrix(pb.β(t_n+c[i]*h)) for i in 1:S]
+    σs=[Matrix(pb.σ(t_n+c[i]*h)) for i in 1:S]
     Bf = s -> Matrix(pb.B(t_n + r*h + s))       # reader of the block we CREATE
     Id=Matrix{Float64}(I,d,d)
     lcoef=_lagr_coefs(c)
@@ -131,7 +133,7 @@ function step_v8m(pb::Prob, a, b, c, h, t_n, r)
     RHSΦ=zeros(S*d, d); for i in 1:S; RHSΦ[(i-1)*d+1:i*d, :] .= Id; end
     Φstack=Minv*RHSΦ
     φstage=[Φstack[(k-1)*d+1:k*d, :] for k in 1:S]
-    return StepV8(Pblock, Yrows, Dk, As, αs, βs, Bf, a, b, c, lcoef, φstage,
+    return StepV8(Pblock, Yrows, Dk, As, αs, βs, σs, Bf, a, b, c, lcoef, φstage,
                   h, d, S, W, BSIZE, r)
 end
 
@@ -170,7 +172,8 @@ function noise_block_v8m(st::StepV8, C)
         Dk=st.Dk[k]
         Mxx=Yk*C*Yk'; Mxd=Yk*C*Dk'; Mdd=Dk*C*Dk'
         Egg[k]=st.αs[k]*Mxx*st.αs[k]' .+ st.αs[k]*Mxd*st.βs[k]' .+
-               st.βs[k]*Mxd'*st.αs[k]' .+ st.βs[k]*Mdd*st.βs[k]'
+               st.βs[k]*Mxd'*st.αs[k]' .+ st.βs[k]*Mdd*st.βs[k]' .+
+               st.σs[k]*st.σs[k]'                      # state-independent (additive) part
         Egg[k]=(Egg[k].+Egg[k]')./2
     end
     # Σ_noise stage solve: (I − h a⊗L) vecΣ = h a⊗vec(Egg), L=I⊗A+A⊗I+α⊗α
@@ -298,4 +301,55 @@ function rho_H_krylov_v8m(eng; tol=1e-11, krylovdim=30)
                                   krylovdim=min(krylovdim,Nv), maxiter=300)
     return maximum(abs.(vals))
 end
+
+# Same as rho_H_krylov_v8m but subtracts the additive-noise constant D=H(0)
+# first, so the eigensolve sees the genuinely LINEAR/homogeneous part even
+# when pb.σ ≠ 0 (rho_H_krylov_v8m would otherwise feed an AFFINE map into
+# KrylovKit.eigsolve, which silently returns a garbage "eigenvalue" polluted
+# by the constant drift — use THIS whenever the problem has additive noise).
+function rho_Hlin_krylov_v8m(eng; tol=1e-11, krylovdim=30)
+    W=eng.W
+    idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
+    Nv=length(idx)
+    function vec2sym(v)
+        C=zeros(W,W); @inbounds for k in 1:Nv; (i,j)=idx[k]; C[i,j]=v[k]; C[j,i]=v[k]; end; C
+    end
+    function sym2vec(C)
+        v=zeros(Nv); @inbounds for k in 1:Nv; (i,j)=idx[k]; v[k]=C[i,j]; end; v
+    end
+    D = sym2vec(applyH_v8m(eng, zeros(W,W)))
+    op(v) = sym2vec(applyH_v8m(eng, vec2sym(v))) .- D
+    x0=sym2vec(Matrix{Float64}(I,W,W))
+    vals,_,_ = KrylovKit.eigsolve(op, x0, 1, :LM; tol=tol,
+                                  krylovdim=min(krylovdim,Nv), maxiter=300)
+    return maximum(abs.(vals))
+end
+
+# Stationary 2nd-moment fixpoint C* = H(C*): with additive noise (pb.σ ≠ 0)
+# applyH_v8m is AFFINE, C_new = Hlin(C) + D with D = applyH_v8m(eng, 0)
+# (every state-dependent noise term Mxx/Mxd/Mdd vanishes at C=0, and PC*P' is
+# exactly linear), so C* solves (I - Hlin) C* = D — a genuine linear system,
+# solved here by GMRES on the vech representation exactly like rho_H_krylov_v8m.
+function fixPoint_v8m(eng; tol=1e-11, krylovdim=30)
+    W=eng.W
+    idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
+    Nv=length(idx)
+    function vec2sym(v)
+        C=zeros(W,W); @inbounds for k in 1:Nv; (i,j)=idx[k]; C[i,j]=v[k]; C[j,i]=v[k]; end; C
+    end
+    function sym2vec(C)
+        v=zeros(Nv); @inbounds for k in 1:Nv; (i,j)=idx[k]; v[k]=C[i,j]; end; v
+    end
+    D = applyH_v8m(eng, zeros(W,W))
+    dvec = sym2vec(D)
+    Hlin(v) = sym2vec(applyH_v8m(eng, vec2sym(v))) .- dvec
+    sol, info = KrylovKit.linsolve(v -> v .- Hlin(v), dvec, dvec; tol=tol,
+                                    krylovdim=min(krylovdim,Nv), maxiter=300)
+    info.converged == 0 && @warn "fixPoint_v8m: GMRES did not fully converge" info
+    return vec2sym(sol)
+end
+# scalar summary for cross-method comparison: stationary variance of the
+# newest state's first component (both engines put x(t_current) in rows 1:d)
+fixPointVar1_v8m(eng; args...) = fixPoint_v8m(eng; args...)[1,1]
+
 println("cov_colloc_v8 (matrix) loaded")

@@ -73,7 +73,13 @@ end
 struct Prob
     d::Int; T::Float64; τ::Float64
     A::Function; B::Function; α::Function; β::Function
+    σ::Function     # state-independent (additive) noise: t -> d×m matrix, m sources.
+                     # Needed only for fixpoint (stationary 2nd-moment) studies: with
+                     # purely multiplicative noise (α,β) the homogeneous covariance
+                     # recursion C_{n+1}=H(C_n) has no nonzero fixed point — σ adds the
+                     # constant forcing D=H(0) that makes the map affine, C*=(I-H)⁻¹D.
 end
+Prob(d,T,τ,A,B,α,β) = Prob(d,T,τ,A,B,α,β, t->zeros(d,1))
 
 # Per-step data: deterministic collocation block map (identical math to v6's
 # step_v4) PLUS the present-drift propagators Φ at the stage nodes & endpoint.

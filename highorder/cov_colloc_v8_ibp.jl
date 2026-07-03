@@ -43,6 +43,7 @@ function step_v8ibp(pb::Prob, a, b, c, h, t_n, r, rough_cols, posmap)
     As=[Matrix(pb.A(t_n+c[i]*h)) for i in 1:S]
     αs=[Matrix(pb.α(t_n+c[i]*h)) for i in 1:S]
     βs=[Matrix(pb.β(t_n+c[i]*h)) for i in 1:S]
+    σs=[Matrix(pb.σ(t_n+c[i]*h)) for i in 1:S]
     Bf = s -> Matrix(pb.B(t_n + r*h + s))
     εfd = 1e-6*h
     Bder = s -> (Matrix(pb.B(t_n+r*h+s+εfd)) .- Matrix(pb.B(t_n+r*h+s-εfd))) ./ (2εfd)
@@ -104,7 +105,7 @@ function step_v8ibp(pb::Prob, a, b, c, h, t_n, r, rough_cols, posmap)
     RHSΦ=zeros(S*d, d); for i in 1:S; RHSΦ[(i-1)*d+1:i*d, :] .= Id; end
     Φstack=Minv*RHSΦ
     φstage=[Φstack[(k-1)*d+1:k*d, :] for k in 1:S]
-    return StepV8(Pblock, Yrows, Dk, As, αs, βs, Bf, a, b, c, lcoef, φstage,
+    return StepV8(Pblock, Yrows, Dk, As, αs, βs, σs, Bf, a, b, c, lcoef, φstage,
                   h, d, S, W, BSIZE, r)
 end
 
