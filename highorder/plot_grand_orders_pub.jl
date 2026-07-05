@@ -19,6 +19,7 @@ order  = ["SDM q=2","SDM q=4","v8 GL1","IBP GL1","v8 GL2","IBP GL2",
 scol   = Dict(1=>:dodgerblue, 2=>:seagreen, 3=>:purple, 4=>:darkorange, 5=>:crimson)
 colof(n) = n=="SDM q=2" ? :black : n=="SDM q=4" ? :gray40 :
            scol[parse(Int, n[end])]
+disp(n) = replace(replace(n, "v8 GL"=>"GL-"), "IBP GL"=>"IBP GL-")
 
 plt = plot(xlabel="p  (steps per principal period)",
            ylabel="|ρ − ρ_ref|",
@@ -50,7 +51,7 @@ for name in order
     ls = startswith(name,"IBP") ? :dash : :solid
     mk = startswith(name,"SDM") ? :circle : (startswith(name,"IBP") ? :diamond : :utriangle)
     plot!(plt, p, max.(e,4e-13), marker=mk, markersize=4.5, markerstrokewidth=0.4,
-          lw=1.8, ls=ls, color=colof(name), label=name)
+          lw=1.8, ls=ls, color=colof(name), label=disp(name))
 end
 savefig(plt, PNG); savefig(plt, PDF)
 for f in (basename(PNG), basename(PDF), basename(CSV))

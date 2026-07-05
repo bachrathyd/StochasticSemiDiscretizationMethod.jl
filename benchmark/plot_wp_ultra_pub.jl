@@ -7,6 +7,17 @@ raw,_ = readdlm(joinpath(@__DIR__,"wp_ultra.csv"), ','; header=true)
 meth=String.(raw[:,1]); p=Int.(raw[:,2]); t=Float64.(raw[:,4]); mem=Float64.(raw[:,5]); err=Float64.(raw[:,6])
 sel(m) = findall((meth.==m) .& (p .> 8))
 cl=sel("classical"); mf=sel("MF")
+# intermediate baseline: single-step recursion with copy (wp_baseline.csv)
+rec_p=Int[]; rec_t=Float64[]; rec_mem=Float64[]; rec_err=Float64[]
+if isfile(joinpath(@__DIR__,"wp_baseline.csv"))
+    rawb,_ = readdlm(joinpath(@__DIR__,"wp_baseline.csv"), ','; header=true)
+    mb=String.(rawb[:,1]); pb=Int.(rawb[:,2])
+    for k in eachindex(mb)
+        if mb[k]=="recursion" && pb[k] > 8
+            push!(rec_p,pb[k]); push!(rec_t,rawb[k,4]); push!(rec_mem,rawb[k,5]); push!(rec_err,rawb[k,6])
+        end
+    end
+end
 
 kw = (framestyle=:box, guidefontsize=11, tickfontsize=9, legendfontsize=9,
       xscale=:log10, minorgrid=true, gridalpha=0.25, minorgridalpha=0.10)
@@ -24,6 +35,13 @@ for (ii,c,mk,lab) in ((cl,:black,:circle,"classical (explicit period product)"),
     plot!(p2, p[ii], mem[ii], color=c, marker=mk, ms=4, lw=1.8, label="")
     plot!(p3, p[ii], err[ii], color=c, marker=mk, ms=4, lw=1.8, label="")
     plot!(p4, t[ii], err[ii], color=c, marker=mk, ms=4, lw=1.8, label="")
+end
+if !isempty(rec_p)
+    plot!(p1, rec_p, max.(rec_t,1e-3), color=:gray30, marker=:square, ms=3.5, lw=1.6,
+          ls=:dash, label="step recursion (copy)")
+    plot!(p2, rec_p, rec_mem, color=:gray30, marker=:square, ms=3.5, lw=1.6, ls=:dash, label="")
+    plot!(p4, max.(rec_t,1e-3), rec_err, color=:gray30, marker=:square, ms=3.5, lw=1.6,
+          ls=:dash, label="")
 end
 plot!(p1, [12,192.0], t[mf[1]] .* ([12,192.0] ./ 12).^2 .* 0.6, ls=:dot, color=:gray60, label="∝ p²")
 plot!(p1, [12,192.0], t[cl[1]] .* ([12,192.0] ./ 12).^4 .* 2.0, ls=:dot, color=:gray30, label="∝ p⁴")

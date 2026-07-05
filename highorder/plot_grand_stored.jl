@@ -22,6 +22,7 @@ const ORDER = ["SDM q=2","SDM q=4","v8 GL1","IBP GL1","v8 GL2","IBP GL2",
 scol = Dict(1=>:dodgerblue, 2=>:seagreen, 3=>:purple, 4=>:darkorange, 5=>:crimson)
 colof(n) = n=="SDM q=2" ? :black : n=="SDM q=4" ? :gray40 : scol[parse(Int,n[end])]
 lsof(n)  = startswith(n,"IBP") ? :dash : :solid
+disp(n) = replace(replace(n, "v8 GL"=>"GL-"), "IBP GL"=>"IBP GL-")
 mkof(n)  = startswith(n,"SDM") ? :circle : (startswith(n,"IBP") ? :diamond : :utriangle)
 # stored sub-blocks per step: SDM stores 1 nodal block; GL-S stores 2S+2.
 multof(n) = startswith(n,"SDM") ? 1 : (2*parse(Int,n[end]) + 2)
@@ -53,7 +54,7 @@ for (ri,row) in enumerate(ROWS)
             x = xmode==:p ? float.(D[n].p) : float.(D[n].p) .* multof(n)
             xx,ee = trunc_floor(x, D[n].e, row.floor)
             plot!(pl, xx, max.(ee,1e-13), color=colof(n), ls=lsof(n), marker=mkof(n),
-                  ms=3.2, markerstrokewidth=0.3, lw=1.5, label= showleg ? n : "")
+                  ms=3.2, markerstrokewidth=0.3, lw=1.5, label= showleg ? disp(n) : "")
         end
         push!(panels, pl)
     end

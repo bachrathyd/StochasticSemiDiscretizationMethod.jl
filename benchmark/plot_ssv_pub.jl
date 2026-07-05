@@ -30,9 +30,23 @@ contourf!(plt, Ω0s, ws, Z, levels=[-0.5,0.5,1.5,2.5],
 contour!(plt, Ω0s, ws, Rho, levels=[1.0], lw=2.5, color=:blue3)
 Vc = map(x -> isnan(x) ? 1e6 : x, Var)
 contour!(plt, Ω0s, ws, Vc, levels=[VARLIM], lw=2.5, color=:red3, ls=:dash)
+# RVA=0 (constant speed) stability baseline, if computed
+rva0file = joinpath(@__DIR__,"ssv_rva0.csv")
+if isfile(rva0file)
+    raw0,_ = readdlm(rva0file, ','; header=true)
+    R0 = fill(NaN,length(ws),length(Ω0s))
+    for k in 1:size(raw0,1)
+        R0[iw[raw0[k,2]],iΩ[raw0[k,1]]] = raw0[k,3]
+    end
+    contour!(plt, Ω0s, ws, R0, levels=[1.0], lw=1.8, color=:gray40, ls=:dot)
+    plot!(plt, [NaN],[NaN], color=:gray40, lw=1.8, ls=:dot,
+          label="ρ(H) = 1 at RVA = 0  (constant speed)")
+end
 plot!(plt, [NaN],[NaN], color=:blue3, lw=2.5, label="ρ(H) = 1  (2nd-moment stability limit)")
 plot!(plt, [NaN],[NaN], color=:red3, lw=2.5, ls=:dash, label="Var(x) = $(VARLIM)  (surface-quality limit)")
-scatter!(plt, [NaN],[NaN], marker=:square, ms=8, color=RGBA(0.72,0.93,0.72,1),
+scatter!(plt, [NaN],[NaN], marker=:square, ms=8, color=RGBA(0.68,0.85,1.0,1),
+         markerstrokewidth=0, label="stable but quality-violating")
+scatter!(plt, [NaN],[NaN], marker=:square, ms=8, color=RGBA(0.60,0.90,0.60,1),
          markerstrokewidth=0, label="safe process window")
 savefig(plt, joinpath(@__DIR__,"ssv_chart.png"))
 savefig(plt, joinpath(@__DIR__,"ssv_chart.pdf"))

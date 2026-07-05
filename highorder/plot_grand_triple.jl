@@ -22,6 +22,7 @@ const ORDER = ["SDM q=2","SDM q=4","v8 GL1","IBP GL1","v8 GL2","IBP GL2",
 scol = Dict(1=>:dodgerblue, 2=>:seagreen, 3=>:purple, 4=>:darkorange, 5=>:crimson)
 colof(n) = n=="SDM q=2" ? :black : n=="SDM q=4" ? :gray40 : scol[parse(Int,n[end])]
 lsof(n)  = startswith(n,"IBP") ? :dash : :solid
+disp(n) = replace(replace(n, "v8 GL"=>"GL-"), "IBP GL"=>"IBP GL-")
 mkof(n)  = startswith(n,"SDM") ? :circle : (startswith(n,"IBP") ? :diamond : :utriangle)
 
 function load(csv)
@@ -70,7 +71,7 @@ for (ri,row) in enumerate(ROWS)
         p,e,t = trunc_floor(D[n].p, D[n].e, D[n].t, row.floor)
         plot!(p3, max.(t,1e-4), max.(e,1e-13), color=colof(n), ls=lsof(n),
               marker=mkof(n), ms=3, markerstrokewidth=0.3, lw=1.4,
-              label = showleg ? n : "")
+              label = showleg ? disp(n) : "")
     end
     push!(panels, p1, p2, p3)
 end
