@@ -51,6 +51,6 @@ scatter!(plt, [NaN],[NaN], marker=:square, ms=8, color=RGBA(0.60,0.90,0.60,1),
 savefig(plt, joinpath(@__DIR__,"ssv_chart.png"))
 savefig(plt, joinpath(@__DIR__,"ssv_chart.pdf"))
 dst = raw"C:\Users\mmuser\My Drive\BD\StochasticSemiDiscretizationMethod.jl\journal_paper\images"
-cp(joinpath(@__DIR__,"ssv_chart.png"), joinpath(dst,"ssv_linear_iter29.png"); force=true)
-cp(joinpath(@__DIR__,"ssv_chart.pdf"), joinpath(dst,"ssv_linear_iter29.pdf"); force=true)
+cp(joinpath(@__DIR__,"ssv_chart.png"), joinpath(dst,"ssv_chart.png"); force=true)
+cp(joinpath(@__DIR__,"ssv_chart.pdf"), joinpath(dst,"ssv_chart.pdf"); force=true)
 println("done — ssv chart final render")
