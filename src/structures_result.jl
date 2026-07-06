@@ -46,7 +46,10 @@ function Result(LDDEP::LDDEProblem{d,AT,BT, cT}, method::DiscretizationMethod{fT
     if calculate_additive
         subVs = Vector{SubV{SVector{d,eltype(eltype(A_avgs))}}}(undef, n_steps) # []
         s_type = SArray{Tuple{K},Float64,1,K}
-        stsubVs = Vector{Vector{stSubV{V} where {V<:AbstractVector{s_type}}}}(undef, LDDEP.w);
+        # one entry per stAdditive SOURCE (was: LDDEP.w = number of Wiener
+        # channels — with fewer sources than channels the register broadcast
+        # duplicated a source into every slot, double-counting its variance)
+        stsubVs = Vector{Vector{stSubV{V} where {V<:AbstractVector{s_type}}}}(undef, length(LDDEP.σs));
         # stSubV(LDDEP.dnoise.delayMX.τ.τ.ws, [Vector{SubV}(undef,n_steps) for i in LDDEP.dnoise.delayMX.τ.τ.ws]) # []
     else
         subVs = Vector{SubV{SVector{d,eltype(eltype(A_avgs))}}}(undef, 0)

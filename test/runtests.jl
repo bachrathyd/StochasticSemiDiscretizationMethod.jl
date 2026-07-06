@@ -67,6 +67,39 @@ function tests()
         @test isapprox(ρ_mf, ρ_dense; rtol=1e-8)
     end
 
+    @testset "Additive variance vs analytic (distinct Wiener channels)" begin
+        # damped oscillator, B=0: stationary Var(x) = σ²/(4ζ) exactly.
+        # The additive source lives on its OWN Wiener channel (nID=2), distinct
+        # from the (zero) multiplicative channel (nID=1) — the case where a
+        # source used to be duplicated into every channel slot (factor 2 in the
+        # factored fixpoint, factor 4 in the classical one).
+        ζ = 0.1; σ = 0.5; τ1 = 2π
+        AMx = ProportionalMX(@SMatrix [0. 1.; -1. -2ζ])
+        BMx = DelayMX(τ1, @SMatrix [0. 0.; 0. 0.])
+        α0  = stCoeffMX(1, ProportionalMX(@SMatrix [0. 0.; 0. 0.]))
+        β0  = stCoeffMX(1, DelayMX(τ1, @SMatrix [0. 0.; 0. 0.]))
+        method = SemiDiscretization(2, (2π+100eps())/50)
+        exact = σ^2/(4ζ)
+
+        lddep = LDDEProblem(AMx, [BMx], [α0], [β0],
+            Additive(2), [stAdditive(2, Additive(@SVector [0., σ]))])
+        rst = StochasticSemiDiscretizationMethod.calculateResults(
+            lddep, method, τ1, n_steps=50, calculate_additive=true)
+        @test isapprox(fixPointOfMapping_MF_factored(rst)[1], exact; rtol=1e-2)
+        @test isapprox(fixPointOfMapping(DiscreteMapping_M2(rst))[1], exact; rtol=1e-2)
+
+        # two independent additive sources (used to throw DimensionMismatch):
+        # variances add across channels.
+        σ2 = 0.3
+        lddep2 = LDDEProblem(AMx, [BMx], [α0], [β0],
+            Additive(2), [stAdditive(2, Additive(@SVector [0., σ])),
+                          stAdditive(3, Additive(@SVector [0., σ2]))])
+        rst2 = StochasticSemiDiscretizationMethod.calculateResults(
+            lddep2, method, τ1, n_steps=50, calculate_additive=true)
+        @test isapprox(fixPointOfMapping_MF_factored(rst2)[1],
+                       (σ^2+σ2^2)/(4ζ); rtol=1e-2)
+    end
+
     # CUDA.functional() alone is not enough: the selected CUDA runtime may not
     # support the installed GPU (e.g. CUDA 13 dropped Pascal). Probe with a real
     # device round-trip before enabling the GPU tests. If the probe fails under
