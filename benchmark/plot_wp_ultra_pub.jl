@@ -1,6 +1,6 @@
 # Final render of the classical-vs-MF work-precision figure from wp_ultra.csv.
 # Drops the first (JIT-compilation-polluted) point of each method.
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using Plots, DelimitedFiles, Printf
 
 raw,_ = readdlm(joinpath(@__DIR__,"wp_ultra.csv"), ','; header=true)

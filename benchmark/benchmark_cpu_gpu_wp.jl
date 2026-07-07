@@ -15,7 +15,7 @@
 # Run:  julia --project=. benchmark/benchmark_cpu_gpu_wp.jl
 # Out:  benchmark/cpu_vs_gpu_wp.csv, benchmark/cpu_vs_gpu_wp.png
 # =============================================================================
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using StochasticSemiDiscretizationMethod
 using StaticArrays, LinearAlgebra, CUDA, Plots, Printf
 

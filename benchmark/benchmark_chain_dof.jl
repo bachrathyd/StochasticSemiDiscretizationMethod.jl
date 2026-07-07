@@ -18,7 +18,7 @@
 # Run:  julia -t 36 --project=. benchmark/benchmark_chain_dof.jl
 # Out:  benchmark/chain_dof.csv, benchmark/chain_dof.png (updated per point)
 # =============================================================================
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using StochasticSemiDiscretizationMethod
 using StaticArrays, LinearAlgebra, CUDA, Plots, Printf
 

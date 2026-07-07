@@ -1,7 +1,7 @@
 # Final render of the 2-DOF SSV chart: BF colormap (hires CSV if present, else test
 # CSV) + MDBM boundary curves + beyond-validity shading, log Ω axis with plain
 # labels. Re-plots from CSVs only.
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using Plots, Printf, DelimitedFiles
 
 const VARLIM=0.25

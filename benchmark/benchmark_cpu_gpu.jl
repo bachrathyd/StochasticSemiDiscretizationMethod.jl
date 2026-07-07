@@ -8,7 +8,7 @@
 #
 # Run:  julia --project=. benchmark/benchmark_cpu_gpu.jl
 # Output: benchmark/cpu_vs_gpu.csv, benchmark/cpu_vs_gpu.png
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using StochasticSemiDiscretizationMethod
 using StaticArrays
 using CUDA

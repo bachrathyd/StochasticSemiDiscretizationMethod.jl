@@ -306,6 +306,20 @@ end
 # d²×d² coefficients (the DiscreteMapping_M2_MF constructor's get_all_coefficients
 # blows the StaticArrays "expression too large" limit at d ≳ 30). This is the
 # path that actually reaches 10-/100-DoF.
+"""
+    spectralRadiusOfMapping_MF_factored(rst::AbstractResult; kwargs...) -> Float64
+    spectralRadiusOfMapping_MF_factored(prob::LDDEProblem, method, DiscretizationLength; n_steps, kwargs...) -> Float64
+
+Second-moment spectral radius ``\\rho(\\mathcal{H})`` computed with the
+**Kronecker-factored** multiplication-free operator. In addition to the
+``\\mathcal{O}(p^2)`` step scaling of [`spectralRadiusOfMapping_MF`](@ref), the
+factored It\\^o operator removes the ``\\mathcal{O}(d^4)`` state-dimension wall of
+the pre-contracted covariance formulation, making moment-stability analysis of
+high-dimensional systems (``d`` up to hundreds of degrees of freedom) tractable.
+The result is algebraically identical to the assembled operator; mean-square
+stability corresponds to ``\\rho(\\mathcal{H}) < 1``. Keyword arguments are
+forwarded to the KrylovKit eigensolver (e.g. `krylovdim`).
+"""
 function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d}; args...) where d
     r = div(rst.n, d) - 1
     D = CovVecIdx((r+1)*d).sectionStarts[end]
@@ -327,6 +341,16 @@ end
 spectralRadiusOfMapping_MF_factored(dm::stDiscreteMapping_M2_MF; args...) =
     spectralRadiusOfMapping_MF_factored(dm.rst; args...)
 
+"""
+    fixPointOfMapping_MF_factored(rst::AbstractResult; kwargs...) -> Vector{Float64}
+
+Stationary second moment ``\\mathbf{M}^\\ast`` computed with the Kronecker-factored
+multiplication-free operator (the fixed-point counterpart of
+[`spectralRadiusOfMapping_MF_factored`](@ref)). Returns the stationary covariance
+in half-vectorized coordinates; the leading entry is the stationary variance of
+the first state component. Requires `calculate_additive = true` when building
+`rst`, and mean-square stability (``\\rho(\\mathcal{H}) < 1``).
+"""
 function fixPointOfMapping_MF_factored(rst::AbstractResult{d}; args...) where d
     r = div(rst.n, d) - 1
     D1 = (r+1)*d

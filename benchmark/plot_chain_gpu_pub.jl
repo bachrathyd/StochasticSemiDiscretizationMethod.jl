@@ -1,7 +1,7 @@
 # Journal figure (appendix): local-GPU vs CPU scaling of the MF second-moment
 # spectral-radius solve across system dimension (oscillator chains, 1..5 DOF)
 # and resolution p. Re-plots benchmark/chain_dof.csv (no recomputation).
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using Plots, Printf, DelimitedFiles
 
 raw,_ = readdlm(joinpath(@__DIR__,"chain_dof.csv"), ','; header=true)

@@ -2,7 +2,7 @@
 # stability boundaries of the stochastic delayed Mathieu equation in the (A,B)
 # plane for increasing multiplicative noise strength. Journal styling matches
 # the other figures of the paper. MDBM boundary detection, q=2 discretization.
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using StochasticSemiDiscretizationMethod
 const SSDM = StochasticSemiDiscretizationMethod
 using StaticArrays, MDBM, Plots, Printf, LinearAlgebra

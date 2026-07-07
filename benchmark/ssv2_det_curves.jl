@@ -11,7 +11,7 @@
 #   julia ssv2_det_curves.jl cs_det 5      # ... with 5 MDBM refinements
 #   julia ssv2_det_curves.jl ssv_det 5     # SSV deterministic boundary  ρ(Φ)=1
 # 2nd arg (optional) overrides N_ITER (MDBM refinement iterations).
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using SemiDiscretizationMethod                     # deterministic package ONLY
 using MDBM, StaticArrays, LinearAlgebra, SparseArrays, KrylovKit, Printf
 BLAS.set_num_threads(1)

@@ -3,7 +3,7 @@
 # matrix; cf. ssv2dof_chart.jl). Semi-implicit (symplectic) Euler–Maruyama —
 # the explicit variant is energy-drift-biased on oscillators (see
 # ssv_mc_diagnostic.jl).
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using StochasticSemiDiscretizationMethod
 const SSDM = StochasticSemiDiscretizationMethod
 using StaticArrays, LinearAlgebra, Printf, Random

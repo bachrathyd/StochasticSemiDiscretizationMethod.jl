@@ -5,7 +5,7 @@
 #
 # Run:  julia --project=. benchmark/combined_wp.jl
 # Out:  benchmark/combined_wp.png
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using Plots, Printf
 
 local_csv = joinpath(@__DIR__, "cpu_vs_gpu_wp.csv")

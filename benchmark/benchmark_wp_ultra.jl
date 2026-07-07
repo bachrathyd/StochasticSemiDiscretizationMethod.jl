@@ -8,7 +8,7 @@
 # Outer loop = resolution; CSV+PNG re-saved after every point (live viewing).
 # Outputs: benchmark/wp_ultra.csv, benchmark/wp_ultra.png/pdf (journal style)
 # =============================================================================
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using StochasticSemiDiscretizationMethod
 const SSDM = StochasticSemiDiscretizationMethod
 using StaticArrays, LinearAlgebra, Plots, Printf, DelimitedFiles

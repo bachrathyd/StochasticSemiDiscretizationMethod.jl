@@ -162,6 +162,20 @@ function get_all_coefficients(rst::AbstractResult{d}) where d
     return MFCoefficients{d, L, L2, Ld}(det_all, stoch_op, detV, stochV, stochGV)
 end
 
+"""
+    DiscreteMapping_M2_MF(rst::AbstractResult)
+    DiscreteMapping_M2_MF(prob::LDDEProblem, method, DiscretizationLength; n_steps, calculate_additive=false)
+
+Build the **multiplication-free** representation of the one-period second-moment
+map of a stochastic delay problem. Unlike [`DiscreteMapping_M2`](@ref), no
+``D\\times D`` operator is assembled; the returned object stores the per-step
+coefficients and exposes only the operator *action*, which the matrix-free
+solvers [`spectralRadiusOfMapping_MF`](@ref) and [`fixPointOfMapping_MF`](@ref)
+consume.
+
+Pass `calculate_additive = true` (via the `LDDEProblem` convenience form or
+through `calculateResults`) to enable the stationary-variance fixed point.
+"""
 function DiscreteMapping_M2_MF(rst::AbstractResult)
     dm1 = DiscreteMapping_M1(rst)
     coeffs = get_all_coefficients(rst)
@@ -369,6 +383,23 @@ end
 
 # --- User API ---
 
+"""
+    spectralRadiusOfMapping_MF(dm::DiscreteMapping_M2_MF; solver=:KrylovKit, kwargs...) -> Float64
+
+Second-moment spectral radius ``\\rho(\\mathcal{H})`` of the one-period map,
+computed **multiplication-free**: the period operator is never assembled, only
+its action on a covariance vector is evaluated inside a matrix-free Krylov
+iteration. This is the ``\\mathcal{O}(p^2)`` path (in the number of steps ``p``
+per period) that replaces the ``\\mathcal{O}(p^4)`` explicit product of
+[`DiscreteMapping_M2`](@ref). Mean-square stability corresponds to
+``\\rho(\\mathcal{H}) < 1``.
+
+`solver` selects the eigensolver backend (`:KrylovKit` by default, or `:Arpack`);
+extra keyword arguments are forwarded to it (e.g. `krylovdim`, `tol`). See
+[`spectralRadiusOfMapping_MF_factored`](@ref) for the Kronecker-factored variant
+that also removes the ``\\mathcal{O}(d^4)`` state-dimension cost, and
+[`spectralRadiusOfMapping_GPU`](@ref) for the CUDA backend.
+"""
 function spectralRadiusOfMapping_MF(dm::stDiscreteMapping_M2_MF; solver=:KrylovKit, args...)
     # coeffs.det[1][1][1] is the first SMatrix in the first step
     d = size(dm.coeffs.det[1][1][1], 1)
@@ -399,6 +430,19 @@ function LinearAlgebra.mul!(y::AbstractVector, mop::IMinusPhiOperator, x::Abstra
     y .= x .- y
 end
 
+"""
+    fixPointOfMapping_MF(dm::DiscreteMapping_M2_MF; kwargs...) -> Vector{Float64}
+
+Stationary second moment (the fixed point ``\\mathbf{M}^\\ast`` of the one-period
+covariance map) computed multiplication-free, for a mean-square stable system
+driven by additive noise. Returns the stationary covariance in half-vectorized
+(``\\operatorname{vech}``) coordinates; use [`VecToCovMx`](@ref) to reshape it
+into a covariance matrix. The leading entry is the stationary variance of the
+first state component.
+
+Requires the mapping to have been built with `calculate_additive = true`. See
+[`fixPointOfMapping_MF_factored`](@ref) for the Kronecker-factored variant.
+"""
 function fixPointOfMapping_MF(dm::stDiscreteMapping_M2_MF; args...)
     d = size(dm.coeffs.det[1][1][1], 1)
     r = div(dm.rst.n, d) - 1

@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite both the software and the accompanying paper."
+title: "StochasticSemiDiscretizationMethod.jl"
+type: software
+authors:
+  - family-names: "Sykora"
+    given-names: "Henrik T."
+  - family-names: "Bachrathy"
+    given-names: "Dániel"
+    email: "bachrathy@mm.bme.hu"
+    affiliation: "Budapest University of Technology and Economics"
+repository-code: "https://github.com/bachrathyd/StochasticSemiDiscretizationMethod.jl"
+license: MIT
+keywords:
+  - stochastic delay differential equations
+  - moment stability
+  - semi-discretization
+  - Julia
+preferred-citation:
+  type: article
+  title: "Multiplication-Free Stochastic Semi-Discretization for the Efficient Moment Stability Analysis of Vibration Systems with Delay"
+  authors:
+    - family-names: "Bachrathy"
+      given-names: "Dániel"
+    - family-names: "Sykora"
+      given-names: "Henrik T."
+  journal: "Journal of Sound and Vibration"
+  year: 2026

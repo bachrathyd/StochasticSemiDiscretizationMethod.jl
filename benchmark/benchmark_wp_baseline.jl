@@ -6,7 +6,7 @@
 #   (2) Krylov iteration counts (numops) for this baseline AND the MF path,
 #       to substantiate the p-independence of the iteration count.
 # Same problem/reference as benchmark_wp_ultra.jl. Output: wp_baseline.csv
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using StochasticSemiDiscretizationMethod
 const SSDM = StochasticSemiDiscretizationMethod
 using StaticArrays, LinearAlgebra, Printf, KrylovKit

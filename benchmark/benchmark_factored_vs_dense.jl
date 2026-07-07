@@ -11,7 +11,7 @@
 # Run:  julia -t 36 --project=. benchmark/benchmark_factored_vs_dense.jl
 # Out:  benchmark/factored_vs_dense.csv, .png  (saved after every point)
 # =============================================================================
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using StochasticSemiDiscretizationMethod
 const SSDM = StochasticSemiDiscretizationMethod
 using StaticArrays, LinearAlgebra, Plots, Printf

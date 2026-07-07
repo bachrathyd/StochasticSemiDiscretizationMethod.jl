@@ -2,7 +2,7 @@
 # Re-plots benchmark/beam_fe.csv (no recomputation): two panels —
 # (a) ρ(H) vs number of retained modes, (b) |ρ − ρ_converged| vs n_m (semilog)
 # with the covariance problem size D annotated.
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using Plots, Printf, DelimitedFiles
 
 raw, hdr = readdlm(joinpath(@__DIR__, "beam_fe.csv"), ','; header=true)

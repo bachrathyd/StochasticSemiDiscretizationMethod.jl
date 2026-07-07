@@ -16,7 +16,7 @@
 #             julia ssv2dof_chart.jl mdbm   → MDBM curves only (needs nothing)
 #             julia ssv2dof_chart.jl        → both
 # =============================================================================
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using StochasticSemiDiscretizationMethod
 const SSDM = StochasticSemiDiscretizationMethod
 using StaticArrays, LinearAlgebra, Printf, DelimitedFiles

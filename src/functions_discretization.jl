@@ -72,6 +72,15 @@ function stDiscreteMapping(rst::AbstractResult)
         stDiscreteMappingSteps(rst)...)
 end
 
+"""
+    DiscreteMapping_M1(rst::AbstractResult[, idxs])
+    DiscreteMapping_M1(prob::LDDEProblem, method, DiscretizationLength; n_steps, calculate_additive=false)
+
+Assemble the one-period **first-moment** (mean) map of the delay problem — the
+deterministic semi-discretization monodromy. Its [`spectralRadiusOfMapping`](@ref)
+is the deterministic Floquet spectral radius and its [`fixPointOfMapping`](@ref)
+the stationary mean.
+"""
 DiscreteMapping_M1(rst::AbstractResult) = DiscreteMapping_M1(DiscreteMappingSteps(rst)...)
 DiscreteMapping_M1(rst::AbstractResult, idxs::AbstractArray{<:Integer}) = DiscreteMapping_M1(DiscreteMappingSteps(rst)..., idxs)
 function DiscreteMapping_M1(LDDEP::LDDEProblem, method::DiscretizationMethod, DiscretizationLength::Real; args...)
@@ -112,6 +121,19 @@ function DiscreteMapping_M2(stdm::stDiscreteMapping, idxs::AbstractArray{<:Integ
     DiscreteMapping_M2(stdm.ts, getindex.(stdm.detMXs, Ref(idxs), Ref(idxs)), getindex.(stdm.detVs, Ref(idxs)), M2_MXs, M1toM2_MXs, M2_Vs)
 end
 
+"""
+    DiscreteMapping_M2(rst::AbstractResult[, idxs])
+    DiscreteMapping_M2(prob::LDDEProblem, method, DiscretizationLength; n_steps, calculate_additive=false)
+
+Assemble the **explicit** one-period second-moment (covariance) map of a
+stochastic delay problem: the classical semi-discretization operator, built and
+stored as a matrix. This is the reference implementation consumed by
+[`spectralRadiusOfMapping`](@ref) and [`fixPointOfMapping`](@ref); it is
+algebraically identical to, but ``\\mathcal{O}(p^2)`` more expensive in memory
+than, the matrix-free [`DiscreteMapping_M2_MF`](@ref). Prefer the MF variants for
+anything but small `p`. Pass `calculate_additive = true` for the stationary
+variance. The optional `idxs` restricts the map to a subset of state components.
+"""
 DiscreteMapping_M2(rst::AbstractResult) = DiscreteMapping_M2(stDiscreteMapping(rst), rst)
 DiscreteMapping_M2(rst::AbstractResult, idxs::AbstractArray{<:Integer}) = DiscreteMapping_M2(stDiscreteMapping(rst), idxs, rst)
 function DiscreteMapping_M2(LDDEP::LDDEProblem, method::DiscretizationMethod, DiscretizationLength::Real; args...)
@@ -129,6 +151,17 @@ function fixPointOfMapping(dm::DiscreteMapping_M1, idxs::AbstractVector{<:Intege
     (I - prodl(dm.M1_MXs,idxs)) \ Vector(reduce_additive(dm.M1_MXs, dm.M1_Vs, idxs))
 end
 
+"""
+    fixPointOfMapping(dm::DiscreteMapping_M2) -> Vector
+    fixPointOfMapping(dm::DiscreteMapping_M1) -> Vector
+
+Stationary fixed point of a discrete map. For a first-moment map
+([`DiscreteMapping_M1`](@ref)) this is the stationary mean; for a second-moment
+map ([`DiscreteMapping_M2`](@ref)) it is the stationary covariance in
+half-vectorized coordinates (reshape with [`VecToCovMx`](@ref)). Requires the
+map to have been built with `calculate_additive = true` and to be
+(mean-square) stable.
+"""
 function fixPointOfMapping(dm::DiscreteMapping_M2)
     v1st = (I - prodl(dm.M1_MXs)) \ Vector(reduce_additive(dm.M1_MXs, dm.M1_Vs))
     (I - prodl(dm.M2_MXs)) \ Vector(reduce_additive(dm.M2_MXs, dm.M1toM2_MXs, dm.M1_MXs, dm.M2_Vs, dm.M1_Vs, v1st))
@@ -141,6 +174,17 @@ function spectralRadiusOfMapping(dm::DiscreteMapping_M1, idxs::AbstractVector{<:
     abs(eigs(prodl(dm.M1_MXs, idxs); args...)[1][1])
 end
 
+"""
+    spectralRadiusOfMapping(dm::DiscreteMapping_M2; kwargs...) -> Float64
+    spectralRadiusOfMapping(dm::DiscreteMapping_M1; kwargs...) -> Float64
+
+Spectral radius of a discrete map's monodromy. For [`DiscreteMapping_M1`](@ref)
+this is the deterministic (first-moment) Floquet spectral radius; for
+[`DiscreteMapping_M2`](@ref) it is the second-moment spectral radius
+``\\rho(\\mathcal{H})``, whose value below `1` certifies mean-square stability.
+Keyword arguments are forwarded to the Arpack eigensolver. For large step counts
+use the matrix-free [`spectralRadiusOfMapping_MF`](@ref) instead.
+"""
 function spectralRadiusOfMapping(dm::DiscreteMapping_M2; args...)
     abs(eigs(prodl(dm.M2_MXs); args...)[1][1])
 end

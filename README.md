@@ -1,5 +1,17 @@
 # StochasticSemiDiscretizationMethod.jl
 
+[![Stable docs](https://img.shields.io/badge/docs-stable-blue.svg)](https://bachrathyd.github.io/StochasticSemiDiscretizationMethod.jl/stable)
+[![Dev docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://bachrathyd.github.io/StochasticSemiDiscretizationMethod.jl/dev)
+[![CI](https://github.com/bachrathyd/StochasticSemiDiscretizationMethod.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/bachrathyd/StochasticSemiDiscretizationMethod.jl/actions/workflows/CI.yml)
+[![codecov](https://codecov.io/gh/bachrathyd/StochasticSemiDiscretizationMethod.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/bachrathyd/StochasticSemiDiscretizationMethod.jl)
+
+Efficient moment-stability and stationary-behaviour analysis of linear stochastic
+delay differential equations, featuring an `O(p²)` multiplication-free
+second-moment solver, a Kronecker-factored operator for high state dimension,
+high-order collocation blocks, and an optional CUDA GPU backend. See the
+[documentation](https://bachrathyd.github.io/StochasticSemiDiscretizationMethod.jl/stable)
+for the full API and worked examples, and [`CITATION.bib`](CITATION.bib) to cite the method.
+
 Julia package to investigate the behaviour of the first and second moments of stochastic linear delay differential equations based on the paper 
 [1] [Stochastic semi‐discretization for linear stochastic delay differential equations](https://onlinelibrary.wiley.com/doi/abs/10.1002/nme.6076) and the book
 [2] [Semi-Discretization for Time-Delay Systems (by Insperger and Stepan)](http://link.springer.com/10.1007/978-1-4614-0335-7).

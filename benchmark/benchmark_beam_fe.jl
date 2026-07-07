@@ -13,7 +13,7 @@
 # Out: benchmark/beam_fe.csv, benchmark/beam_fe.png +
 #      journal_paper/images/beam_mesh_convergence.png
 # =============================================================================
-using Pkg; Pkg.activate(joinpath(@__DIR__, ".."))
+using Pkg; Pkg.activate(@__DIR__)
 using StochasticSemiDiscretizationMethod
 const SSDM = StochasticSemiDiscretizationMethod
 using LinearAlgebra, Plots, Printf, KrylovKit
