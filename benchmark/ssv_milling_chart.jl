@@ -20,8 +20,8 @@ const SSDM = StochasticSemiDiscretizationMethod
 using StaticArrays, LinearAlgebra, Plots, Printf, DelimitedFiles
 BLAS.set_num_threads(1)
 
-const N_TEETH=2; const aD=0.5; const KtKn=0.3
-const RVA=0.10; const NT=10; const ζ=0.02
+const N_TEETH=2; const aD=0.2454325; const KtKn=0.3   # ~25% immersion, UP-milling
+const RVA=0.25; const NT=10; const ζ=0.02
 const σc=0.20; const σa=0.10
 const VARLIM=0.25
 const R_RES=24; const NAT_RES=30
@@ -32,7 +32,7 @@ const PAPER_IMG = raw"C:\Users\mmuser\My Drive\BD\StochasticSemiDiscretizationMe
 
 function hfun(t, Ω0, Tssv, rva)
     φ0 = rva==0 ? Ω0*t : Ω0*t - (Ω0*rva*Tssv/(2π))*(cos(2π*t/Tssv) - 1.0)
-    φen = acos(2aD - 1); φex = float(π)
+    φen = 0.0; φex = acos(1 - 2aD)          # up-milling entry/exit
     hsum = 0.0
     for j in 0:N_TEETH-1
         φ = mod(φ0 + 2π*j/N_TEETH, 2π)
@@ -66,8 +66,8 @@ function solve_point(Ω0, w; rva=RVA, σcv=σc, σav=σa, want_var::Bool=false)
     (ρ, v)
 end
 
-Ω0s = collect(range(0.16, 1.50, length=80))
-ws  = collect(range(0.01, 2.40, length=56))
+Ω0s = collect(range(0.20, 2.00, length=48))   # coarse pass; refine after approval
+ws  = collect(range(0.02, 4.00, length=32))
 Rho  = fill(NaN, length(ws), length(Ω0s))   # stochastic SSV
 Rdet = fill(NaN, length(ws), length(Ω0s))   # deterministic SSV
 Rcs  = fill(NaN, length(ws), length(Ω0s))   # deterministic constant-speed (classic lobes)
@@ -87,10 +87,11 @@ function redraw()
     length(done) < 2 && return
     jj = done
     plt = plot(xlabel="dimensionless spindle speed  Ω₀", ylabel="depth of cut  w",
-               size=(1050,640), framestyle=:box, dpi=300,
+               size=(1500,520), framestyle=:box, dpi=300,
                guidefontsize=13, tickfontsize=11, legendfontsize=9,
-               left_margin=5Plots.mm, bottom_margin=5Plots.mm,
-               xlim=(Ω0s[1],Ω0s[end]), ylim=(0,ws[end]), legend=:topleft)
+               left_margin=5Plots.mm, bottom_margin=6Plots.mm,
+               xlim=(Ω0s[1],Ω0s[end]), ylim=(0,ws[end]),
+               legend=:topright, legend_column=2)
     # colormap: log10 stationary variance over the stochastically stable region
     L = map(eachindex(Var)) do k
         (isnan(Var[k]) || Rho[k] ≥ 1.0) ? NaN : log10(max(Var[k],1e-6))
