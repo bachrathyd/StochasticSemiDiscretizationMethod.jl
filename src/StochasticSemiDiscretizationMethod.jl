@@ -2,7 +2,15 @@
     StochasticSemiDiscretizationMethod
 
 Moment-stability and stationary-behaviour analysis of linear stochastic delay
-differential equations (SDDEs) by semi-discretization of the delayed term.
+differential equations (SDDEs) by discretization of the delayed term into a
+one-period moment map.
+
+Despite the historical name, the package is no longer limited to the *classical*
+semi-discretization: it also provides a multiplication-free ``\\mathcal{O}(p^2)``
+evaluation of the same operator, a Kronecker-factored form for high state
+dimension, an optional CUDA backend, and — the current flagship — a **high-order
+Gauss–Legendre collocation** solver that reaches order ``2S`` in the second
+moment at a much smaller memory footprint per accuracy.
 
 The workflow is: describe the system as an [`LDDEProblem`](@ref), turn it into a
 one-period moment map, and read off its spectral radius (stability) or fixed
@@ -11,16 +19,21 @@ point (stationary mean/variance).
 - First moment (deterministic): [`DiscreteMapping_M1`](@ref).
 - Second moment: the explicit [`DiscreteMapping_M2`](@ref), or the
   memory-lean multiplication-free [`DiscreteMapping_M2_MF`](@ref).
-- Solvers: [`spectralRadiusOfMapping`](@ref) / [`fixPointOfMapping`](@ref)
-  (explicit), [`spectralRadiusOfMapping_MF`](@ref) /
+- Semi-discretization solvers: [`spectralRadiusOfMapping`](@ref) /
+  [`fixPointOfMapping`](@ref) (explicit), [`spectralRadiusOfMapping_MF`](@ref) /
   [`fixPointOfMapping_MF`](@ref) (``\\mathcal{O}(p^2)`` matrix-free),
   [`spectralRadiusOfMapping_MF_factored`](@ref) /
-  [`fixPointOfMapping_MF_factored`](@ref) (Kronecker-factored, high `d`), and
-  the CUDA backend [`spectralRadiusOfMapping_GPU`](@ref) /
+  [`fixPointOfMapping_MF_factored`](@ref) (Kronecker-factored, high `d`), and the
+  CUDA backend [`spectralRadiusOfMapping_GPU`](@ref) /
   [`spectralRadiusOfMapping_auto`](@ref) (loaded via `using CUDA`).
+- High-order collocation (order ``2S``):
+  [`spectralRadiusOfMapping_collocation`](@ref) /
+  [`fixPointOfMapping_collocation`](@ref).
 
 Mean-square stability corresponds to a second-moment spectral radius below `1`.
-See the package documentation for worked examples.
+The classical/factored path remains the choice for high state dimension and
+engineering tolerances; the collocation path wins decisively at tight tolerances
+in low/moderate dimension. See the package documentation for worked examples.
 """
 module StochasticSemiDiscretizationMethod
 
@@ -62,6 +75,8 @@ include("functions_discretization.jl")
 include("functions_multifree.jl")
 include("functions_multifree_factored.jl")
 include("functions_gpu_stubs.jl")   # GPU methods live in ext/…CUDAExt.jl (weakdep)
+include("collocation_engine.jl")    # internal high-order Gauss–Legendre engine
+include("collocation.jl")           # user-facing collocation wrappers
 
 export  SemiDiscretization, NumericSD,
 ProportionalMX,
@@ -80,7 +95,9 @@ spectralRadiusOfMapping_MF_factored,
 fixPointOfMapping_MF_factored,
 spectralRadiusOfMapping_GPU,
 spectralRadiusOfMapping_auto,
-fixPointOfMapping_GPU
+fixPointOfMapping_GPU,
+spectralRadiusOfMapping_collocation,
+fixPointOfMapping_collocation
 
 include("precompile.jl")
 

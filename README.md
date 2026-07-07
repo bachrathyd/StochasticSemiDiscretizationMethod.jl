@@ -6,9 +6,22 @@
 [![codecov](https://codecov.io/gh/bachrathyd/StochasticSemiDiscretizationMethod.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/bachrathyd/StochasticSemiDiscretizationMethod.jl)
 
 Efficient moment-stability and stationary-behaviour analysis of linear stochastic
-delay differential equations, featuring an `O(p²)` multiplication-free
-second-moment solver, a Kronecker-factored operator for high state dimension,
-high-order collocation blocks, and an optional CUDA GPU backend. See the
+delay differential equations.
+
+> **Note — the name is historical.** This package began as the *classical*
+> semi-discretization method, but it has grown well beyond it. It now provides an
+> `O(p²)` **multiplication-free** evaluation of the second-moment operator, a
+> **Kronecker-factored** form for high state dimension, an optional **CUDA GPU**
+> backend, and — the current flagship — a **high-order Gauss–Legendre collocation**
+> solver that reaches **order 2S** in the second moment (e.g. order 6 at `S=3`)
+> with far smaller memory use per digit of accuracy. We keep the registered name
+> for continuity, but "semi-discretization" is now just one of several methods
+> inside it.
+
+Rule of thumb: the classical/factored path is best for **high state dimension**
+and engineering tolerances; the **collocation** path (`spectralRadiusOfMapping_collocation`,
+default `S=3` ≈ GL3) wins decisively at **tight tolerances** in low/moderate
+dimension. See the
 [documentation](https://bachrathyd.github.io/StochasticSemiDiscretizationMethod.jl/stable)
 for the full API and worked examples, and [`CITATION.bib`](CITATION.bib) to cite the method.
 

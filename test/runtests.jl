@@ -67,6 +67,30 @@ function tests()
         @test isapprox(ρ_mf, ρ_dense; rtol=1e-8)
     end
 
+    @testset "High-order Gauss–Legendre collocation (order 2S)" begin
+        # delayed-PD-drift stochastic Mathieu (β ≡ 0 ⇒ pruned engine), additive noise
+        Afun(t) = @SMatrix [0.0 1.0; -(1.0+0.5cos(2π*t)) -0.4]
+        Bfun(t) = @SMatrix [0.0 0.0; 0.20*(1+0.3cos(2π*t)) 0.12*(1+0.4cos(2π*t))]
+        αfun(t) = @SMatrix [0.0 0.0; 0.30 0.0]
+        βfun(t) = @SMatrix [0.0 0.0; 0.0 0.0]
+        prob = LDDEProblem(ProportionalMX(Afun), [DelayMX(1.0, Bfun)],
+            [stCoeffMX(1, ProportionalMX(αfun))], [stCoeffMX(1, DelayMX(1.0, βfun))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        T = 1.0
+        ρref = spectralRadiusOfMapping_collocation(prob, T, 64; S=3)
+        @test 0.0 < ρref < 1.0
+        # measured convergence order ≈ 2S for S = 1, 2, 3
+        for S in (1, 2, 3)
+            e_lo = abs(spectralRadiusOfMapping_collocation(prob, T, 6; S=S) - ρref)
+            e_hi = abs(spectralRadiusOfMapping_collocation(prob, T, 24; S=S) - ρref)
+            order = log(e_lo / e_hi) / log(24 / 6)
+            @test isapprox(order, 2S; atol=0.4)
+        end
+        # stationary variance is finite and positive
+        Var = fixPointOfMapping_collocation(prob, T, 32; S=3)[1, 1]
+        @test isfinite(Var) && Var > 0
+    end
+
     @testset "Additive variance vs analytic (distinct Wiener channels)" begin
         # damped oscillator, B=0: stationary Var(x) = σ²/(4ζ) exactly.
         # The additive source lives on its OWN Wiener channel (nID=2), distinct
