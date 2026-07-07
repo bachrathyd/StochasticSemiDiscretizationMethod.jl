@@ -7,6 +7,20 @@ CurrentModule = StochasticSemiDiscretizationMethod
 ```@index
 ```
 
+## Unified interface (method selection)
+
+The recommended entry points: pick a discretization `method` and get the
+second-moment spectral radius or the stationary variance. The default method is
+`Collocation(3)` (order 6).
+
+```@docs
+MomentMethod
+Collocation
+ClassicalSD
+spectralRadiusOfMoment
+stationaryVariance
+```
+
 ## Problem definition
 
 ```@docs

@@ -12,9 +12,22 @@ dimension, an optional CUDA backend, and — the current flagship — a **high-o
 Gauss–Legendre collocation** solver that reaches order ``2S`` in the second
 moment at a much smaller memory footprint per accuracy.
 
-The workflow is: describe the system as an [`LDDEProblem`](@ref), turn it into a
-one-period moment map, and read off its spectral radius (stability) or fixed
-point (stationary mean/variance).
+The quickest entry is the unified, method-selecting interface — high-order
+collocation by default:
+
+```julia
+ρ   = spectralRadiusOfMoment(prob, period, n_steps; method = GaussLegendre(3))  # order 6
+var = stationaryVariance(prob, period, n_steps;    method = GaussLegendre(3))
+ρsd = spectralRadiusOfMoment(prob, period, n_steps; method = ClassicalSD(2))     # reference
+```
+
+selecting between [`Collocation`](@ref)`(S)` (alias `GaussLegendre`, order ``2S``)
+and [`ClassicalSD`](@ref)`(q)` (first order, kept for cross-checks). The
+lower-level building blocks below are also available directly.
+
+The general workflow is: describe the system as an [`LDDEProblem`](@ref), turn it
+into a one-period moment map, and read off its spectral radius (stability) or
+fixed point (stationary mean/variance).
 
 - First moment (deterministic): [`DiscreteMapping_M1`](@ref).
 - Second moment: the explicit [`DiscreteMapping_M2`](@ref), or the
@@ -77,6 +90,7 @@ include("functions_multifree_factored.jl")
 include("functions_gpu_stubs.jl")   # GPU methods live in ext/…CUDAExt.jl (weakdep)
 include("collocation_engine.jl")    # internal high-order Gauss–Legendre engine
 include("collocation.jl")           # user-facing collocation wrappers
+include("moment_methods.jl")        # unified method-selecting interface
 
 export  SemiDiscretization, NumericSD,
 ProportionalMX,
@@ -97,7 +111,9 @@ spectralRadiusOfMapping_GPU,
 spectralRadiusOfMapping_auto,
 fixPointOfMapping_GPU,
 spectralRadiusOfMapping_collocation,
-fixPointOfMapping_collocation
+fixPointOfMapping_collocation,
+MomentMethod, Collocation, GaussLegendre, ClassicalSD,
+spectralRadiusOfMoment, stationaryVariance
 
 include("precompile.jl")
 

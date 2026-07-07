@@ -91,6 +91,28 @@ function tests()
         @test isfinite(Var) && Var > 0
     end
 
+    @testset "Unified method selection (collocation vs classical SD)" begin
+        Afun(t) = @SMatrix [0.0 1.0; -(1.0+0.5cos(2π*t)) -0.4]
+        Bfun(t) = @SMatrix [0.0 0.0; 0.20*(1+0.3cos(2π*t)) 0.12*(1+0.4cos(2π*t))]
+        αfun(t) = @SMatrix [0.0 0.0; 0.30 0.0]
+        βfun(t) = @SMatrix [0.0 0.0; 0.0 0.0]
+        prob = LDDEProblem(ProportionalMX(Afun), [DelayMX(1.0, Bfun)],
+            [stCoeffMX(1, ProportionalMX(αfun))], [stCoeffMX(1, DelayMX(1.0, βfun))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        T = 1.0
+        # default method is Collocation(3)
+        @test spectralRadiusOfMoment(prob, T, 12) ==
+              spectralRadiusOfMoment(prob, T, 12; method=Collocation(3))
+        @test GaussLegendre(3) === Collocation(3)
+        # collocation (few steps) and classical SD (many steps) agree on ρ and Var
+        ρ_gl = spectralRadiusOfMoment(prob, T, 16; method=GaussLegendre(3))
+        ρ_sd = spectralRadiusOfMoment(prob, T, 400; method=ClassicalSD(2))
+        @test isapprox(ρ_gl, ρ_sd; rtol=2e-2)
+        v_gl = stationaryVariance(prob, T, 16; method=Collocation(3))
+        v_sd = stationaryVariance(prob, T, 400; method=ClassicalSD(2))
+        @test isapprox(v_gl, v_sd; rtol=3e-2)
+    end
+
     @testset "Additive variance vs analytic (distinct Wiener channels)" begin
         # damped oscillator, B=0: stationary Var(x) = σ²/(4ζ) exactly.
         # The additive source lives on its OWN Wiener channel (nID=2), distinct

@@ -17,11 +17,17 @@ prob = LDDEProblem(ProportionalMX(A), [DelayMX(1.0, B)],
 
 const T = 1.0
 
-# GL3 (order 6) is a good default: a handful of steps already gives many digits.
-ρ     = spectralRadiusOfMapping_collocation(prob, T, 12; S = 3)
-var_x = fixPointOfMapping_collocation(prob, T, 12; S = 3)[1, 1]
+# Unified interface: pick the method. GaussLegendre(3) (= order 6) is the default;
+# a handful of steps already gives many digits.
+ρ     = spectralRadiusOfMoment(prob, T, 12; method = GaussLegendre(3))
+var_x = stationaryVariance(prob, T, 12;    method = GaussLegendre(3))
 @printf("GL3, p=12:  ρ(H) = %.10f   (mean-square %s)\n", ρ, ρ < 1 ? "stable" : "UNSTABLE")
-@printf("            stationary Var(x) = %.8f\n\n", var_x)
+@printf("            stationary Var(x) = %.8f\n", var_x)
+
+# The classical semi-discretization survives as an explicit option (first order,
+# so it needs many more steps for the same accuracy — kept for cross-checks):
+ρ_sd = spectralRadiusOfMoment(prob, T, 400; method = ClassicalSD(2))
+@printf("ClassicalSD(2), p=400:  ρ(H) = %.10f  (matches GL3 above)\n\n", ρ_sd)
 
 # Demonstrate the measured order 2S: error in ρ(H) vs steps p, for S = 1, 2, 3.
 ρref = spectralRadiusOfMapping_collocation(prob, T, 96; S = 3)   # fine reference
