@@ -1,0 +1,80 @@
+\documentclass[11pt]{letter}
+\usepackage[a4paper,margin=2.6cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\signature{D\'aniel Bachrathy \\ (on behalf of the authors) \\[4pt]
+Department of Applied Mechanics \\
+Faculty of Mechanical Engineering \\
+Budapest University of Technology and Economics \\
+M\H{u}egyetem rkp.\ 3., H-1111 Budapest, Hungary \\
+bachrathy@mm.bme.hu}
+\address{Department of Applied Mechanics \\
+Budapest University of Technology and Economics \\
+Budapest, Hungary}
+\date{\today}
+
+\begin{document}
+\begin{letter}{Editorial Office \\ Journal of Sound and Vibration}
+
+\opening{Dear Editors,}
+
+Please consider our manuscript, \emph{``Multiplication-Free Stochastic
+Semi-Discretization for the Efficient Moment Stability Analysis of Vibration
+Systems with Delay''} by D\'aniel Bachrathy and Henrik T.~Sykora, for
+publication in the \emph{Journal of Sound and Vibration} as a regular research
+paper.
+
+The moment stability analysis of stochastic delay differential equations ---
+the natural model class for machining dynamics, delayed feedback control, and
+connected vehicles under noise --- has long been limited by the
+$\mathcal{O}(p^4)$ cost of assembling and multiplying the second-moment step
+operators of the semi-discretization framework. The manuscript removes this
+bottleneck and, we believe, changes what is practically computable in this
+field:
+
+\begin{enumerate}
+\item A \textbf{multiplication-free reformulation} evaluates the identical
+      discrete second-moment operator in strictly $\mathcal{O}(p^2)$ time.
+      Measured on the same machine and the same operator, the advantage over
+      the explicit period product reaches $1.3\times10^{3}$ in wall-clock time
+      and $6.3\times10^{3}$ in memory allocation already at $p=192$, beyond
+      which the classical route is infeasible while the new one continues to
+      $p=4096$.
+\item A \textbf{Kronecker-factored It\^o operator} removes the
+      $\mathcal{O}(d^4)$ state-dimension wall: second-moment computations for
+      systems with one hundred degrees of freedom --- covariance eigenproblems
+      with millions of unknowns --- complete within minutes on a workstation,
+      with a GPU port included in the accompanying open-source package.
+\item \textbf{High-order collocation covariance blocks} raise the measured
+      second-moment convergence order to $2S$ (rates consistent with order
+      eight at $S=4$), where all previous schemes of this family were limited
+      to first order.
+\item The methodology is demonstrated on a \textbf{two-degree-of-freedom
+      milling process with spindle-speed variation}, time-varying delay, and
+      multiplicative cutting-force noise. The resulting process map separates,
+      for the first time at this fidelity, the deterministic stability gain of
+      spindle-speed variation from the part that stochasticity takes back, and
+      shows that the practically usable window is set by a surface-quality
+      (stationary-variance) boundary lying strictly below all stability
+      boundaries. The stationary variance is validated against an independent
+      Monte-Carlo simulation to within $1.4\%$.
+\end{enumerate}
+
+All results are reproducible: the methods are released in an open-source
+Julia package, every figure has a generating script, and the numerical
+experiments specify hardware, solver settings, and per-figure computational
+cost.
+
+The manuscript is original, has not been published previously, and is not
+under consideration elsewhere. All authors have approved the submission and
+declare no competing interests. Given the topic, the readership of the
+\emph{Journal of Sound and Vibration} --- at the intersection of nonlinear
+vibrations, machining dynamics, and computational methods --- is the natural
+audience for this work.
+
+Thank you for your consideration.
+
+\closing{Yours sincerely,}
+
+\end{letter}
+\end{document}

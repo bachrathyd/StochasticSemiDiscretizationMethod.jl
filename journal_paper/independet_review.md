@@ -1,0 +1,37 @@
+# Peer Review Report
+
+**Journal:** Journal of Sound and Vibration (JSV)
+**Manuscript Title:** Multiplication-Free Stochastic Semi-Discretization for the Efficient Moment Stability Analysis of Vibration Systems with Delay
+**Authors:** Dániel Bachrathy, Henrik T. Sykora
+
+---
+
+## Reviewer 1: Theoretical and Numerical Methods (Highly Critical)
+
+**Recommendation:** Major Revision
+
+**General Comments:**
+While the authors present what they claim is a "breakthrough" in solving Stochastic Delay Differential Equations (SDDEs), the manuscript reads more like a software manual for their Julia package than a rigorous mathematical treatise. The authors make grandiose claims about complexity reduction ($\mathcal{O}(p^4)$ to $\mathcal{O}(p^2)$) and high-order convergence, but conveniently gloss over several severe numerical and theoretical inconsistencies. The term "Multiplication-Free" itself is a misnomer, as the method still heavily relies on block matrix-vector multiplications; it is merely an avoidance of dense matrix-matrix assembly. Before this paper can be considered for publication in a D1 journal, the authors must address the foundational numerical flaws and provide a much more transparent analysis of their algorithmic overhead.
+
+**Major Concerns & Questions:**
+1. **Inconsistent Quadrature Schemes:** In Section 4, the authors state that the Itô-isometry integral is evaluated using a simple *trapezoidal* quadrature ($K$-point) to achieve the Kronecker factorization. Yet, in Section 5, they boast about implementing high-order Gauss-Legendre collocation (up to 8th order) to break the first-order barrier of the second moment. This is a glaring inconsistency. If the underlying stochastic quadrature is low-order trapezoidal, how can the authors mathematically justify the overall high-order convergence for systems with non-autonomous, highly oscillatory diffusion coefficients? The error bounds of the trapezoidal rule will inevitably dominate.
+2. **Hidden Constants and Small-$p$ Performance:** The authors proudly show the $1.3 \times 10^3$ speedup at $p=192$ (Fig. 2). However, they completely hide the constant factors of the $\mathcal{O}(p^2)$ approach. Given the overhead of the virtual circular buffers, index mapping, and repeated Krylov iterations, at what specific resolution $p$ does the classical SSDM actually outperform MF-SSDM? Provide a plot zooming in on $p < 20$.
+3. **Krylov Solver Black-Box:** The authors state they use GMRES and Arnoldi iteration via `KrylovKit.jl`, but provide zero mathematical detail on the convergence properties of the $\mathcal{I} - \mathcal{H}$ operator. Is the spectrum clustered? Does GMRES stall? What preconditioner is used? Bypassing the assembly of $\mathcal{H}$ means you cannot easily precondition it. If the Krylov solver requires hundreds of iterations for a poorly conditioned system (e.g., near strong resonances), the $\mathcal{O}(p^2)$ per-iteration cost is meaningless.
+4. **Collocation Memory Explosion:** In Section 5, the authors admit that Gauss-Legendre blocks store $2S+2$ sub-states. For $S=4$, that is 10 sub-states per delay slot. If this is applied to the 100-DOF system mentioned in Section 4, the block size becomes $1000 \times 1000$, and the memory required will explode quadratically. The authors have not stress-tested the *combined* effect of high state dimension ($d$) and high stage count ($S$). Show the memory scaling for $d=100$ and $S=4$.
+5. **The IBP "Remedy" is Restrictive:** The Integration-by-Parts (IBP) trick for "rough" reads heavily assumes that a smooth antiderivative is readily available in the state vector (e.g., companion form). The "block-local" integral alternative is mentioned as a fallback, but its computational overhead and impact on the Krylov convergence rate are entirely ignored.
+
+---
+
+## Reviewer 2: Applied Dynamics and Manufacturing Engineering (Highly Critical)
+
+**Recommendation:** Major Revision
+
+**General Comments:**
+The authors attempt to map their theoretical stochastic framework onto a physical Spindle Speed Variation (SSV) milling problem. However, the mechanical modeling is heavily idealized, linear, and in some places, physically dubious. The authors seem more interested in demonstrating their numerical solver than in capturing the actual physics of machining chatter. The claim that this establishes a "direct mapping" between stationary variance and workpiece surface roughness is a massive overstatement that ignores decades of tribology and machining literature. The manuscript requires a major rewrite to temper its claims and justify its physical assumptions.
+
+**Major Concerns & Questions:**
+1. **Unrealistic Noise Intensities:** In the SSV milling example (Eq. 25), the authors casually apply a multiplicative noise intensity of $\sigma_c = 0.3$ to the cutting-force coefficient. This implies a $30\%$ standard deviation in the cutting force purely due to random noise. This is absurdly high for any stable, modern machining operation. Is this value physically justified by experimental data, or was it artificially inflated just to make the divergence between the stability limit and the quality limit visually obvious in Fig. 8? Provide experimental citations for this noise level.
+2. **Naive Surface Roughness Mapping:** Equation 26 asserts $R_a \approx \sqrt{2/\pi} \sqrt{\text{Var}(x)}$. This is a gross oversimplification. Macroscopic surface roughness is dominated by kinematic feed marks, tool nose radius, runout, and plastic side-flow. Tool vibration variance is only one component, and it rarely maps linearly to $R_a$ because the tool does not leave a perfectly sinusoidal imprint. The authors must strictly rephrase this as a "theoretical vibration-induced surface location error" rather than actual $R_a$, or provide empirical validation.
+3. **Linearity Assumption in Chatter:** The model in Eq. 25 is strictly linear. Real machining chatter is highly non-linear due to the "fly-over" effect (loss of contact between the tool and workpiece when vibration amplitude exceeds the feed per tooth). If the stationary variance $\text{Var}(x)$ is large enough to violate the surface quality limit, it is highly likely that the tool is already losing contact, rendering the linear SDDE model invalid. How do the authors justify using a purely linear moment-stability theory in a regime where nonlinear effects dominate?
+4. **White Noise in PD Control:** In Section 6, the authors model the noise driving the delayed derivative (velocity) term as standard Gaussian white noise. In real CNC machines, velocity is derived from encoder positions and passed through low-pass digital filters. The noise is heavily colored, not white. If the noise is colored, the path is no longer Brownian-rough ($C^{1/2^-}$), and the entire premise of the first-order collapse and the necessity of the IBP formulation becomes questionable. The authors must address the physical reality of band-limited noise in control systems.
+5. **Lack of Experimental Validation:** For a paper in the *Journal of Sound and Vibration* making strong claims about manufacturing processes and control systems, the complete absence of experimental validation is glaring. The "work-precision" studies are purely numerical self-consistency checks. At a minimum, the authors must validate the variance predictions against a numerical Monte Carlo simulation of the SSV milling equation to prove their semi-discretization hasn't introduced systemic biases.
