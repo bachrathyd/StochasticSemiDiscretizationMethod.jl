@@ -6,7 +6,7 @@ using Plots, Printf, DelimitedFiles
 
 const VARLIM=0.25
 const ΩLO=0.125; const ΩHI=1.5; const WHI=4.0
-const PAPER_IMG = raw"C:\Users\mmuser\My Drive\BD\StochasticSemiDiscretizationMethod.jl\journal_paper\images"
+const PAPER_IMG = joinpath(@__DIR__, "..", "journal_paper", "images")  # present on the paper-sources branch; copy is skipped (try/catch) if absent
 
 bffile = "ssv2_chart_bf.csv"
 raw,_ = readdlm(joinpath(@__DIR__,bffile), ','; header=true)
