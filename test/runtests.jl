@@ -113,6 +113,41 @@ function tests()
         @test isapprox(v_gl, v_sd; rtol=3e-2)
     end
 
+    @testset "T/τ ratios (τ<T, τ=T, τ>T) — collocation vs classical SD" begin
+        make(τ) = LDDEProblem(
+            ProportionalMX(t -> @SMatrix [0.0 1.0; -(1.0+0.5cos(2π*t)) -0.4]),
+            [DelayMX(τ, t -> @SMatrix [0.0 0.0; 0.15 0.08])],
+            [stCoeffMX(1, ProportionalMX(t -> @SMatrix [0.0 0.0; 0.25 0.0]))],
+            [stCoeffMX(1, DelayMX(τ, t -> @SMatrix zeros(2,2)))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        T = 1.0
+        for (ratio, p) in ((0.5, 24), (1.0, 16), (2.0, 16))
+            prob = make(ratio*T)
+            @test isapprox(ratio*p, round(ratio*p); atol=1e-9)   # r = τ·p/T integer
+            ρ_gl = spectralRadiusOfMoment(prob, T, p;   method=GaussLegendre(3))
+            ρ_sd = spectralRadiusOfMoment(prob, T, 500; method=ClassicalSD(2))
+            @test isapprox(ρ_gl, ρ_sd; rtol=2e-2)
+        end
+    end
+
+    @testset "time-periodic (cyclostationary) variance profile" begin
+        # τ = 0.5 < T = 1 ⇒ buffer padded to a full period internally
+        prob = LDDEProblem(
+            ProportionalMX(t -> @SMatrix [0.0 1.0; -(1.0+0.5cos(2π*t)) -0.4]),
+            [DelayMX(0.5, t -> @SMatrix [0.0 0.0; 0.15 0.08])],
+            [stCoeffMX(1, ProportionalMX(t -> @SMatrix [0.0 0.0; 0.25 0.0]))],
+            [stCoeffMX(1, DelayMX(0.5, t -> @SMatrix zeros(2,2)))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        T = 1.0; p = 40
+        t, v = timePeriodicVariance(prob, T, p)
+        @test length(t) == p && length(v) == p
+        @test all(x -> isfinite(x) && x > 0, v)
+        # phase-0 equals the single-phase stationary variance
+        @test isapprox(v[1], stationaryVariance(prob, T, p; method=ClassicalSD(2)); rtol=1e-8)
+        # genuinely varies over the period
+        @test (maximum(v) - minimum(v)) / maximum(v) > 1e-3
+    end
+
     @testset "Additive variance vs analytic (distinct Wiener channels)" begin
         # damped oscillator, B=0: stationary Var(x) = σ²/(4ζ) exactly.
         # The additive source lives on its OWN Wiener channel (nID=2), distinct

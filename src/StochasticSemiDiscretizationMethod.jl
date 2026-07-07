@@ -113,7 +113,7 @@ fixPointOfMapping_GPU,
 spectralRadiusOfMapping_collocation,
 fixPointOfMapping_collocation,
 MomentMethod, Collocation, GaussLegendre, ClassicalSD,
-spectralRadiusOfMoment, stationaryVariance
+spectralRadiusOfMoment, stationaryVariance, timePeriodicVariance
 
 include("precompile.jl")
 

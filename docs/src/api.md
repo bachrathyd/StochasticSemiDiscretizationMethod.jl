@@ -19,6 +19,7 @@ Collocation
 ClassicalSD
 spectralRadiusOfMoment
 stationaryVariance
+timePeriodicVariance
 ```
 
 ## Problem definition
