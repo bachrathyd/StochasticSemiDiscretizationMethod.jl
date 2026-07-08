@@ -25,6 +25,32 @@ dimension. See the
 [documentation](https://bachrathyd.github.io/StochasticSemiDiscretizationMethod.jl/stable)
 for the full API and worked examples, and [`CITATION.bib`](CITATION.bib) to cite the method.
 
+## High-order convergence
+
+The unified interface picks the discretization by keyword — Gauss–Legendre
+collocation (order `2S`) by default:
+
+```julia
+using StochasticSemiDiscretizationMethod, StaticArrays
+# ... build prob::LDDEProblem, principal period T, steps-per-period p ...
+ρ   = spectralRadiusOfMoment(prob, T, p; method = GaussLegendre(3))  # order 6 (default)
+var = stationaryVariance(prob, T, p;    method = GaussLegendre(3))
+ρsd = spectralRadiusOfMoment(prob, T, p; method = ClassicalSD(2))     # classical, for reference
+```
+
+Accuracy vs CPU time in ρ(𝓗) on a delayed-PD stochastic Mathieu oscillator
+(reproduce with [`examples/plot_highorder_wp.jl`](examples/plot_highorder_wp.jl)):
+
+![](./assets/HighOrderConvergence.png)
+
+The collocation blocks reach error levels the classical first-order scheme cannot
+attain at any practical step count. At **loose tolerances** the fast
+multiplication-free / Kronecker-factored classical path is the economical choice
+(and the only one that scales to high state dimension); at **tight tolerances**
+the high-order collocation wins — far more digits per unit accuracy. The current
+collocation backend is a straightforward reference implementation and is not yet
+performance-tuned.
+
 Julia package to investigate the behaviour of the first and second moments of stochastic linear delay differential equations based on the paper 
 [1] [Stochastic semi‐discretization for linear stochastic delay differential equations](https://onlinelibrary.wiley.com/doi/abs/10.1002/nme.6076) and the book
 [2] [Semi-Discretization for Time-Delay Systems (by Insperger and Stepan)](http://link.springer.com/10.1007/978-1-4614-0335-7).

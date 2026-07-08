@@ -1,13 +1,7 @@
-# Environment for the tutorial example scripts. Self-contained sub-project.
-#
-# One-time setup (from the repository root):
-#     julia --project=examples -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
-#
-# then run e.g.
-#     julia --project=examples examples/HayesEquation.jl
 [deps]
 DelaunayTriangulation = "927a84f5-c5f4-47a5-9785-b46e178433df"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 MDBM = "dd61e66b-39ce-57b0-8813-509f78be4b4d"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+StochasticSemiDiscretizationMethod = "048039a2-5e1a-11e9-0eb6-5da22298fca4"
