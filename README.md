@@ -66,6 +66,33 @@ dimension (the collocation engine is limited to low/moderate `d`, a single delay
 and a single Wiener channel) the factored classical path is the only one that
 scales.
 
+### Automatic path selection — you never choose
+
+The engine reads the *structure* of your problem and always takes the fastest
+correct path; **there is nothing to configure**. The only choice that is yours is
+the accuracy target (the `method` keyword, e.g. `GaussLegendre(3)` for order 6
+vs `ClassicalSD(2)`) — everything below it is automatic and the answer is the
+same regardless:
+
+- **No delayed multiplicative noise (`β ≡ 0`)** — feedback control (P or PD),
+  regenerative machining with noise on the *present* cutting force, or any model
+  whose stochastic terms read only the present state. The collocation engine
+  detects this from the coefficients and **prunes** the covariance block from
+  `2S+2` to `S+2` sub-states: **≈2.6–2.8× less memory and ≈1.4× faster per
+  solve**. This is exactly the case in the figure above (a lightly-damped delayed
+  Mathieu), which is why GL5 reaches the solver floor within a few milliseconds.
+- **Delayed multiplicative noise (`β ≢ 0`)** — e.g. milling with force-coefficient
+  noise that also reads the *delayed* tool position. The full, unpruned block is
+  used automatically, at no overhead.
+
+The detection is a structural test of the coefficient functions — you pass your
+`LDDEProblem` and the best internal path runs. The result is **bit-identical**
+either way (verified to `10⁻¹³` on both `ρ(𝓗)` and the stationary variance): the
+pruning changes only the cost, never the number. On top of that, every path here
+is orders of magnitude cheaper than the classical explicit period product — the
+multiplication-free evaluation alone is ≈`8.5×10³` faster at `p = 192` (see the
+[paper](paper/)'s work-precision study).
+
 > **Timing tip.** These solvers do many small/thin matrix products, and default
 > multithreaded BLAS forks all its threads for each one — the fork/join overhead
 > then dominates, causing a sudden jump in CPU time at a resolution threshold
