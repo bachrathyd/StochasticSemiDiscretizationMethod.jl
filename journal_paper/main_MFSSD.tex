@@ -241,6 +241,7 @@ The factored form \eqref{eq:factored_apply} and the pre-contracted tensor \eqref
 \centering
 \caption{Measured wall-clock times of the second-moment spectral-radius computation for the periodic, delayed, stochastically excited oscillator chain ($\tau = T/2$, so the delay spans $r = p/2$ steps; the circular buffer of the implementation retains the $r{+}1$ history blocks plus one write slot, hence $D = \frac12 d(r{+}2)\big(d(r{+}2){+}1\big)$; $p$ = steps per period; It\^o-isometry quadrature $K=20$). ``Dense'' = classical pre-contracted operator (coefficient assembly + Krylov solve); ``factored'' = Kronecker-factored operator (assembly negligible). Agreement of $\rho(\mathcal{H})$ between the two forms is $\le 5\times10^{-15}$ wherever both run. (Xeon Gold 6154, single-threaded solve, Julia 1.11.)}
 \label{tab:kron_scaling}
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{rrrrrr}
 \toprule
 DOF & $d$ & $p$ & $D=\dim \operatorname{vech} \mathbf{M}$ & dense (build+solve) [s] & factored solve [s] \\
@@ -252,7 +253,8 @@ DOF & $d$ & $p$ & $D=\dim \operatorname{vech} \mathbf{M}$ & dense (build+solve) 
 50  & 100 & 32  & $1.6\times10^{6}$ & --- & $37.1$ \\
 100 & 200 & 24  & $3.9\times10^{6}$ & --- & $218.6$ \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table}
 
 We remark that the factored form is also the natural formulation for massively parallel hardware: the per-step work consists of independent small dense products. A GPU implementation of the multiplication-free recursion --- with the entire Krylov iteration resident on the device and only the Floquet multiplier returned to the host, available in the accompanying package behind a one-line switch --- is presented in Appendix~\ref{app:gpu}, with measured speedups growing with both $p$ and $d$.
@@ -416,6 +418,7 @@ The engineering deliverables of Fig.~\ref{fig:ssv} are computed over $\Omega_0 \
 \small
 \caption{Computational cost of the layers of Fig.~\ref{fig:ssv}. Each job ran alone on $56$ threads of the workstation specified in Section~\ref{sec:results}; boundary curves use the two-phase MDBM pattern (zeroth-order bracketing + one linear-interpolation pass). ``Equivalent resolution'' is the uniform grid that a brute-force sweep would need for the same boundary accuracy.}
 \label{tab:ssv_cost}
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{llccrr}
 \toprule
 layer & solver & initial grid / refinements & equivalent resolution & points & time [s] \\
@@ -426,7 +429,8 @@ variance color map & MF-SSDM ($\rho$ + fixpoint) & $96\times64$ (full sweep) & $
 (3) SSV, $\rho(\mathcal{H})=1$ & MF-SSDM & $10\times6$ / $5$ & $289\times161$ & $846$ & $1751$ \\
 (4) SSV, $\operatorname{Var}(x)=0.25$ & MF-SSDM (fixpoint) & $10\times6$ / $5$ & $289\times161$ & $629$ & $1616$ \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table} For the zero-mean stationary response of the linear model \eqref{eq:milling} (there is no deterministic forcing here, so the response is purely stochastic; the response is Gaussian in the additive-noise-dominated regime, while strong parametric noise induces excess kurtosis, making the estimate below approximate), the mean absolute deviation of the tool-tip displacement obeys $\mathbb{E}|x| = \sqrt{2/\pi}\,\sigma_x$, and identifying the surface profile height with the tool-tip displacement at the surface-generation instants gives the standard estimate of the \emph{noise-induced contribution} to the arithmetic roughness,
 \begin{equation}
 \label{eq:ra_formula}
