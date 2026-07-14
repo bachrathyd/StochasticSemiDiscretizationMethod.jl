@@ -31,7 +31,7 @@ plt = plot(pa, pb, layout=(1,2), size=(1150,430), dpi=300,
            left_margin=7Plots.mm, bottom_margin=7Plots.mm)
 savefig(plt, joinpath(@__DIR__, "beam_fe_pub.png"))
 savefig(plt, joinpath(@__DIR__, "beam_fe_pub.pdf"))
-dst = raw"C:\Users\mmuser\My Drive\BD\StochasticSemiDiscretizationMethod.jl\journal_paper\images"
+dst = joinpath(@__DIR__, "..", "journal_paper", "images"); mkpath(dst)  # local paper images
 for f in ("beam_fe_pub.png","beam_fe_pub.pdf")
     cp(joinpath(@__DIR__,f), joinpath(dst, replace(f,"beam_fe_pub"=>"beam_mesh_convergence")); force=true)
 end

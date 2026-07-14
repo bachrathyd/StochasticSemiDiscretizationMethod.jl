@@ -48,7 +48,7 @@ plot!(p1, [12,192.0], t[cl[1]] .* ([12,192.0] ./ 12).^4 .* 2.0, ls=:dot, color=:
 plt = plot(p1,p2,p3,p4, layout=(2,2), size=(1150,860), dpi=300,
            left_margin=6Plots.mm, bottom_margin=5Plots.mm)
 savefig(plt, joinpath(@__DIR__,"wp_ultra.png")); savefig(plt, joinpath(@__DIR__,"wp_ultra.pdf"))
-dst = raw"C:\Users\mmuser\My Drive\BD\StochasticSemiDiscretizationMethod.jl\journal_paper\images"
+dst = joinpath(@__DIR__, "..", "journal_paper", "images"); mkpath(dst)  # local paper images
 for f in ("wp_ultra.png","wp_ultra.pdf"); cp(joinpath(@__DIR__,f), joinpath(dst,f); force=true); end
 # ratios for the paper text
 i1=findfirst(==(192), p[cl]); j1=findfirst(==(192), p[mf])

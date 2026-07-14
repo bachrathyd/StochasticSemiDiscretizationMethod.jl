@@ -34,7 +34,7 @@ plt = plot(p1, p2, layout=(1,2), size=(1300,520), dpi=300,
            left_margin=6Plots.mm, bottom_margin=6Plots.mm)
 savefig(plt, joinpath(@__DIR__,"chain_gpu_pub.png"))
 savefig(plt, joinpath(@__DIR__,"chain_gpu_pub.pdf"))
-dst = raw"C:\Users\mmuser\My Drive\BD\StochasticSemiDiscretizationMethod.jl\journal_paper\images"
+dst = joinpath(@__DIR__, "..", "journal_paper", "images"); mkpath(dst)  # local paper images
 for f in ("chain_gpu_pub.png","chain_gpu_pub.pdf")
     cp(joinpath(@__DIR__,f), joinpath(dst, replace(f,"chain_gpu_pub"=>"gpu_chain_scaling")); force=true)
 end
