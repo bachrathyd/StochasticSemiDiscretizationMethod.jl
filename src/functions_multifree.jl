@@ -412,7 +412,10 @@ function spectralRadiusOfMapping_MF(dm::stDiscreteMapping_M2_MF; solver=:KrylovK
         res, _ = eigs(op, v0=rand(D); args...)
         return abs(res[1])
     elseif solver == :KrylovKit
-        vals, _, _ = eigsolve(op, rand(D), 1, :LM; args...)
+        # eager: stop once the dominant eigenpair meets tol instead of always
+        # building the full krylovdim basis (≈ halves the matvec count);
+        # a user-passed `eager` in args still wins (later duplicate overrides)
+        vals, _, _ = eigsolve(op, rand(D), 1, :LM; eager=true, args...)
         return abs(vals[1])
     else
         error("Unknown solver: $solver. Use :Arpack or :KrylovKit.")

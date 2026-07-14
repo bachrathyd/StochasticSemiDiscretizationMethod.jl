@@ -775,25 +775,238 @@ function noise_block_v9m(st::StepV9, C)
     return ΔB
 end
 
+# ---------------------------------------------------------------------------
+# Precomputed per-step noise operator (fast path for the Krylov eigensolve).
+#
+# noise_block_v9m(st, C) is AFFINE in the covariance C: C enters ONLY through the
+# S stage contractions Egg[k] = αs[k]·(Yk C Ykᵀ)·αs[k]ᵀ (+ σσᵀ, constant).
+# Everything downstream — the Σ-noise stage solve, the present-drift propagators
+# φ, and the Bf-weighted causal-kernel quadrature — is a FIXED linear map that
+# noise_block_v9m rebuilds on EVERY Krylov matvec (≈1000 Bf evaluations + a
+# Float64-keyed φ Dict + megabytes of allocation per call; ~99% of the solver
+# time). We precompute that map once per step.
+#
+# Downstream of the Σ-solve every block of ΔB is linear in the S matrices
+#     R_m = As_m Σs_m + Σs_m As_mᵀ + αs_m Σs_m αs_mᵀ + Egg_m ,   Σs = Mop⁻¹ rhs(Egg),
+# so for each output block (br,bc) we store S matrices `Mten[g][m]` (d²×d²) with
+#     vec(ΔB[br,bc]) = Σ_m Mten[g][m] · vec(R_m) .
+# Per matvec the noise block is then: Egg (tiny), one S·d²×S·d² solve, and a
+# handful of d²×d² mat-vecs — numerically identical to noise_block_v9m
+# (agreement ~1e-15), ~1000× cheaper.
+struct NoiseOpV9
+    Mop::Matrix{Float64}                       # S·d² Σ-solve operator (C-independent)
+    a::Matrix{Float64}
+    As::Vector{Matrix{Float64}}
+    αs::Vector{Matrix{Float64}}
+    σs::Vector{Matrix{Float64}}
+    # The stage rows Y read the covariance window only at their structurally
+    # nonzero columns (the newest endpoint x_e and the S delayed-J blocks —
+    # (S+1)d columns out of W), so the Egg contraction Y C Yᵀ needs just the
+    # gathered nzc×nzc submatrix of C instead of two full-W products.
+    nzc::Vector{Int}                           # nonzero columns of Yrows (logical)
+    Ynz::Matrix{Float64}                       # Sd × length(nzc) compressed stage rows
+    h::Float64; d::Int; S::Int; BSIZE::Int
+    brs::Vector{UnitRange{Int}}                # output block row/col ranges …
+    bcs::Vector{UnitRange{Int}}
+    Mten::Vector{Vector{Matrix{Float64}}}      # … and their response tensors
+end
+
+# M .+= s·kron(transpose(R), L)  (all d×d), allocation-free.
+@inline function _kron_acc!(M, s, R, L)
+    d = size(L, 1)
+    @inbounds for jc in 1:d, ic in 1:d
+        v = s * R[jc, ic]                       # transpose(R)[ic,jc] = R[jc,ic]
+        r0 = (ic-1)*d; c0 = (jc-1)*d
+        for bb in 1:d, aa in 1:d
+            M[r0+aa, c0+bb] += v * L[aa, bb]
+        end
+    end
+end
+
+# Same but takes RT = Rᵀ (lets the callers build RT with a single mul! instead
+# of materializing transpose products): M .+= s·kron(RT, L).
+@inline function _kron_acc_t!(M, s, RT, L)
+    d = size(L, 1)
+    @inbounds for jc in 1:d, ic in 1:d
+        v = s * RT[ic, jc]
+        r0 = (ic-1)*d; c0 = (jc-1)*d
+        for bb in 1:d, aa in 1:d
+            M[r0+aa, c0+bb] += v * L[aa, bb]
+        end
+    end
+end
+
+function _build_noiseop_v9(st::StepV9)
+    d=st.d; S=st.S; h=st.h; a=st.a; b=st.b; c=st.c; BSIZE=st.BSIZE; d2=d*d
+    Id=Matrix{Float64}(I,d,d)
+    # C-independent Σ-noise operator (I − h a⊗L), L=I⊗A+A⊗I+α⊗α
+    Mop=Matrix{Float64}(I,S*d2,S*d2)
+    for i in 1:S, j in 1:S
+        Lj=kron(Id,st.As[j]) .+ kron(st.As[j],Id) .+ kron(st.αs[j],st.αs[j])
+        Mop[(i-1)*d2+1:i*d2, (j-1)*d2+1:j*d2] .-= h*a[i,j].*Lj
+    end
+    # memoized present-drift propagator and its inverse (both C-independent).
+    # The causal kernel needs ratios φ(a)/φ(b); precompute φ⁻¹ once per node and
+    # multiply, avoiding ~1000 small dense right-divisions (LU solves) per step.
+    φcache=Dict{Float64,Matrix{Float64}}();  φf(θ)=get!(()->_φ_at9(st,θ),φcache,θ)
+    iφcache=Dict{Float64,Matrix{Float64}}(); iφf(θ)=get!(()->inv(φf(θ)),iφcache,θ)
+    Bcache=Dict{Float64,Matrix{Float64}}();  Bfc(θ)=get!(()->st.Bf(θ*h),Bcache,θ)
+    T1=Matrix{Float64}(undef,d,d); T2=Matrix{Float64}(undef,d,d)   # gemm scratch
+    brs=UnitRange{Int}[]; bcs=UnitRange{Int}[]; Mten=Vector{Matrix{Float64}}[]
+    function newgroup!(br,bc)
+        push!(brs,br); push!(bcs,bc); push!(Mten,[zeros(d2,d2) for _ in 1:S]); length(brs)
+    end
+    coefΣ(θ,m) = h*_lint(st.lcoef[m], θ)        # Σn(θ) = Σ_m coefΣ(θ,m)·R_m
+    rng_J(i) = (i*d+1 : (i+1)*d)
+    # endpoint–endpoint block:  endm = Σ_m (h b_m) R_m
+    g=newgroup!(1:d, 1:d)
+    for m in 1:S; _kron_acc!(Mten[g][m], h*b[m], Id, Id); end
+    θJ=vcat(c, 1.0)
+    # node–J blocks: ΔB[J_i, x_e] = ∫ Bf(s) Σn(s) (φ(1)/φ(s))ᵀ ds  (x_e is node θ=1)
+    # (all products staged through the T1/T2 scratch as Rᵀ; see _kron_acc_t!)
+    for i in 1:S+1
+        θa=θJ[i]; g=newgroup!(rng_J(i), 1:d)
+        for (gx,gw) in zip(_G8.x, _G8.w)
+            θ=θa*gx
+            L=Bfc(θ); mul!(T1, φf(1.0), iφf(θ))              # RT = φ(1)·φ(θ)⁻¹
+            for m in 1:S; _kron_acc_t!(Mten[g][m], h*θa*gw*coefΣ(θ,m), T1, L); end
+        end
+    end
+    # J–J blocks: ΔB[J_i, J_j] = ∬ Bf(s) Δ(s,v) Bf(v)ᵀ  (causal kernel, split at v)
+    for i in 1:S+1, j in 1:S+1
+        j < i && continue
+        θa=θJ[i]; θb=θJ[j]; g=newgroup!(rng_J(i), rng_J(j))
+        for (gx,gw) in zip(_G8.x, _G8.w)
+            ϑ=θb*gx; wϑ=θb*gw; Bv=Bfc(ϑ)
+            segs = ϑ<θa ? ((0.0,ϑ),(ϑ,θa)) : ((0.0,θa),)
+            for (lo,hi) in segs
+                hi<=lo && continue
+                for (gx2,gw2) in zip(_G8.x, _G8.w)
+                    θ=lo+(hi-lo)*gx2
+                    w=h*h*wϑ*(hi-lo)*gw2
+                    if θ<=ϑ                       # Δ = Σn(θ)·(φ(ϑ)/φ(θ))ᵀ
+                        L=Bfc(θ)
+                        mul!(T1, φf(ϑ), iφf(θ)); mul!(T2, Bv, T1)   # RT = Bv·φϑ·φθ⁻¹
+                        for m in 1:S; _kron_acc_t!(Mten[g][m], w*coefΣ(θ,m), T2, L); end
+                    else                          # Δ = (φ(θ)/φ(ϑ))·Σn(ϑ)
+                        mul!(T1, φf(θ), iφf(ϑ)); mul!(T2, Bfc(θ), T1)  # L = Bfθ·φθ·φϑ⁻¹
+                        for m in 1:S; _kron_acc_t!(Mten[g][m], w*coefΣ(ϑ,m), Bv, T2); end
+                    end
+                end
+            end
+        end
+    end
+    nzc = [j for j in 1:size(st.Yrows,2) if any(!iszero, @view st.Yrows[:,j])]
+    Ynz = st.Yrows[:, nzc]
+    NoiseOpV9(Mop, a, st.As, st.αs, st.σs, nzc, Ynz, h, d, S, BSIZE, brs, bcs, Mten)
+end
+
+# Assemble ΔB for a given covariance C using the precomputed operator.
+# `_noise_apply_v9!` overwrites its target; `_noise_apply_add_v9!` accumulates
+# (used to fold the noise block straight into the new-block diagonal).
+function _noise_apply_v9!(ΔB, op::NoiseOpV9, C)
+    fill!(ΔB, 0.0)
+    _noise_apply_add_v9!(ΔB, op, C)
+end
+
+function _noise_apply_add_v9!(target, op::NoiseOpV9, C)
+    nnz=length(op.nzc)
+    Cnz=Matrix{Float64}(undef, nnz, nnz)
+    @inbounds for (jj,cj) in enumerate(op.nzc), (ii,ci) in enumerate(op.nzc)
+        Cnz[ii,jj]=C[ci,cj]
+    end
+    _noise_apply_add_nz_v9!(target, op, Cnz)
+end
+
+# Same, but C is in ring-buffer (rotated) layout: `phys[t]` is the physical
+# column of the t-th noise-gather column op.nzc[t]; `Cnz` is a caller-owned
+# nnz×nnz scratch (avoids the per-call allocation on the solver hot path).
+function _noise_apply_add_v9_phys!(target, op::NoiseOpV9, C, phys::AbstractVector{Int}, Cnz)
+    @inbounds for jj in eachindex(phys), ii in eachindex(phys)
+        Cnz[ii,jj]=C[phys[ii],phys[jj]]
+    end
+    _noise_apply_add_nz_v9!(target, op, Cnz)
+end
+
+function _noise_apply_add_nz_v9!(target, op::NoiseOpV9, Cnz)
+    d=op.d; S=op.S; d2=d*d
+    Egg=Vector{Matrix{Float64}}(undef,S)
+    for k in 1:S
+        Yk=@view op.Ynz[(k-1)*d+1:k*d, :]
+        Mxx=Yk*Cnz*Yk'
+        e=op.αs[k]*Mxx*op.αs[k]' .+ op.σs[k]*op.σs[k]'
+        Egg[k]=(e.+e')./2
+    end
+    rhs=zeros(S*d2)
+    for j in 1:S, k in 1:S; rhs[(j-1)*d2+1:j*d2] .+= op.h*op.a[j,k].*vec(Egg[k]); end
+    vΣ=op.Mop\rhs
+    Rm=[Vector{Float64}(undef,d2) for _ in 1:S]
+    for m in 1:S
+        Σm=reshape(@view(vΣ[(m-1)*d2+1:m*d2]), d, d)
+        R=op.As[m]*Σm .+ Σm*op.As[m]' .+ op.αs[m]*Σm*op.αs[m]' .+ Egg[m]
+        Rm[m].=vec(R)
+    end
+    vb=Vector{Float64}(undef,d2)
+    @inbounds for g in eachindex(op.brs)
+        fill!(vb, 0.0)
+        for m in 1:S; mul!(vb, op.Mten[g][m], Rm[m], 1.0, 1.0); end
+        br=op.brs[g]; bc=op.bcs[g]
+        k=0
+        for cc in bc, rr in br
+            k+=1; target[rr,cc]+=vb[k]
+        end
+        if br!=bc
+            k=0
+            for cc in bc, rr in br
+                k+=1; target[cc,rr]+=vb[k]     # transpose block
+            end
+        end
+    end
+    target
+end
+
 function build_v9m(pb::Prob, S, p; force=false)
-    if !force && !_no_delay_noise(pb)
-        return build_v8m(pb, S, p)               # unsafe to prune ⇒ fall back to v8
+    if !_no_delay_noise(pb)
+        force || return build_v8m(pb, S, p)      # unsafe to prune ⇒ fall back to v8
+        @warn "build_v9m(force=true) on a problem with β ≢ 0: the pruned engine " *
+              "drops the stage-value blocks, so the delayed multiplicative noise " *
+              "is IGNORED — diagnostics only, ρ will be wrong" maxlog=1
     end
     a,b,c=gl_tab(S); h=pb.T/p; r=round(Int,pb.τ/h)
     abs(r*h-pb.τ) < 1e-9*max(pb.τ,1.0) || error("τ/h not integer")
     r ≥ 1 || error("need r ≥ 1")
     steps=[step_v9m(pb,a,b,c,h,(n-1)*h,r) for n in 1:p]
     W=steps[1].W; BSIZE=steps[1].BSIZE
-    U=Matrix{Float64}(I,W,W)
-    for st in steps
-        Td=zeros(W,W); Td[1:BSIZE,:]=st.Pblock
-        for k in 1:r; Td[k*BSIZE+1:(k+1)*BSIZE,(k-1)*BSIZE+1:k*BSIZE]=Matrix(I,BSIZE,BSIZE); end
-        U=Td*U
-    end
-    return (steps=steps,U=U,W=W,BSIZE=BSIZE,p=p,engine=:v9)
+    # precompute the per-step noise operators (the eigensolve's hot path)
+    ops=[_build_noiseop_v9(st) for st in steps]
+    # NOTE: the dense W×W monodromy `U` (rho_U) is intentionally NOT assembled
+    # here — the second-moment path (rho_H_krylov_v9m / fixPoint_v9m) never reads
+    # it, and building it was O(p·W³) of wasted work.
+    return (steps=steps,ops=ops,W=W,BSIZE=BSIZE,p=p,r=r,d=steps[1].d,engine=:v9)
 end
 
 function applyH_v9m(eng,C)
+    Ck=copy(C)
+    haskey(eng, :ops) || return _applyH_v9m_slow(eng, Ck)   # legacy engines w/o ops
+    ΔB=Matrix{Float64}(undef, eng.BSIZE, eng.BSIZE)
+    for n in 1:eng.p
+        st=eng.steps[n]; W=st.W; BSIZE=st.BSIZE; keep=W-BSIZE
+        P=st.Pblock; PC=P*Ck
+        _noise_apply_v9!(ΔB, eng.ops[n], Ck)
+        newdiag=PC*P' + ΔB
+        Cnew=similar(Ck)
+        Cnew[1:BSIZE,1:BSIZE]=newdiag
+        Cnew[1:BSIZE,BSIZE+1:end]=PC[:,1:keep]
+        Cnew[BSIZE+1:end,1:BSIZE]=transpose(PC[:,1:keep])
+        Cnew[BSIZE+1:end,BSIZE+1:end]=Ck[1:keep,1:keep]
+        Ck=Cnew
+    end
+    return Ck
+end
+
+# Original (reference) path, kept for regression comparison against the
+# precomputed noise operator; rebuilds noise_block_v9m every call.
+function _applyH_v9m_slow(eng,C)
     Ck=copy(C)
     for st in eng.steps
         W=st.W; BSIZE=st.BSIZE; keep=W-BSIZE
@@ -812,7 +1025,150 @@ end
 # dispatch helpers: v9 eng (has :engine=:v9) vs v8 fallback (a plain NamedTuple)
 _applyH(eng,C) = haskey(eng,:engine) && eng.engine==:v9 ? applyH_v9m(eng,C) : applyH_v8m(eng,C)
 
+# ---------------------------------------------------------------------------
+# Allocation-free one-period map for the Krylov eigensolve.
+#
+# The structured update  C ↦ [PCPᵀ+ΔB  (PC)_past; (CPᵀ)_past  C_past,past]  is
+# applied on a BLOCK RING BUFFER: the covariance stays in place and a rotation
+# offset tracks which physical (r+1)-block slot holds which window age. Each
+# step overwrites only the slot whose block just fell out of the window (one
+# B×B diagonal block + 2·B·(W−B) cross entries); the O(W²) "shift the whole
+# history" copy of a naive implementation never happens. `Pblock`'s column
+# sparsity (the new-block rows read the window only at the newest endpoint,
+# cols 1:d, and the delayed J-block r−1 — two contiguous ranges) makes P·C
+# cost O(B²·W) instead of O(B·W²).
+struct V9Workspace
+    C::Matrix{Float64}        # W×W covariance, block ring-buffer layout
+    PC::Matrix{Float64}       # B×W new-block cross rows (physical cols)
+    nd::Matrix{Float64}       # B×B new-diagonal scratch
+    physnz::Vector{Int}       # per-step physical noise-gather columns
+    Cnz::Matrix{Float64}      # nnz×nnz gathered submatrix for the noise op
+    lmap::Vector{Int}         # logical→physical column map (period-end offset)
+end
+V9Workspace(eng) = begin
+    nnz = maximum(length(o.nzc) for o in eng.ops)   # per-step nzc counts can differ
+    V9Workspace(zeros(eng.W, eng.W), zeros(eng.BSIZE, eng.W),
+                zeros(eng.BSIZE, eng.BSIZE), Vector{Int}(undef, nnz),
+                Matrix{Float64}(undef, nnz, nnz), Vector{Int}(undef, eng.W))
+end
+
+# logical column c ↦ physical column at rotation offset o (0-based blocks)
+function _fill_lmap!(lmap, o, B, nblk)
+    @inbounds for c in eachindex(lmap)
+        b = (c-1) ÷ B; w = c - b*B
+        lmap[c] = ((o + b) % nblk)*B + w
+    end
+    lmap
+end
+
+# One period on the ring buffer. ws.C enters in CANONICAL layout (offset 0)
+# and leaves rotated; returns the final offset (always mod(-p, r+1)).
+function _applyH_period_ring!(ws::V9Workspace, eng)
+    B=eng.BSIZE; d=eng.d; r=eng.r; nblk=r+1
+    C=ws.C; PC=ws.PC; nd=ws.nd; phys=ws.physnz
+    delcols = (r-1)*B+d+1 : r*B                   # delayed J-cols of Pblock
+    o = 0
+    @inbounds for n in 1:eng.p
+        P=eng.steps[n].Pblock; op=eng.ops[n]
+        xe_b  = o                                 # physical block of logical 0
+        del_b = (o + r - 1) % nblk                # physical block of logical r−1
+        new_b = (o + r) % nblk                    # dropped slot ⇒ new block
+        xe_rows  = xe_b*B+1 : xe_b*B+d
+        del_rows = del_b*B+d+1 : del_b*B+B
+        # PC = P[:,1:d]·C[x_e rows,:] + P[:,delcols]·C[del rows,:]
+        @views mul!(PC, P[:,1:d],     C[xe_rows,:],  1.0, 0.0)
+        @views mul!(PC, P[:,delcols], C[del_rows,:], 1.0, 1.0)
+        # new diagonal block = PC·Pᵀ (same two column ranges) + noise
+        @views mul!(nd, PC[:,xe_rows],  transpose(P[:,1:d]),     1.0, 0.0)
+        @views mul!(nd, PC[:,del_rows], transpose(P[:,delcols]), 1.0, 1.0)
+        nnz=length(op.nzc)
+        for t in 1:nnz
+            c=op.nzc[t]; b=(c-1)÷B; w=c-b*B
+            phys[t] = ((o + b) % nblk)*B + w
+        end
+        @views _noise_apply_add_v9_phys!(nd, op, C, phys[1:nnz], ws.Cnz[1:nnz,1:nnz])
+        # overwrite the dead slot with the new block (reads of C are done)
+        nrng = new_b*B+1 : new_b*B+B
+        for q in 0:nblk-1
+            q == new_b && continue
+            qrng = q*B+1 : q*B+B
+            @views copyto!(C[nrng, qrng], PC[:, qrng])
+            @views transpose!(C[qrng, nrng], PC[:, qrng])
+        end
+        @views copyto!(C[nrng, nrng], nd)
+        o = new_b                                 # new block is now logical 0
+    end
+    return o
+end
+
+# Compat wrapper: canonical-in, canonical-out (de-rotates into a fresh matrix).
+# The solvers below avoid the de-rotation by packing through lmap directly.
+function _applyH_period!(ws::V9Workspace, eng, src::Matrix{Float64})
+    src === ws.C || copyto!(ws.C, src)
+    o = _applyH_period_ring!(ws, eng)
+    _fill_lmap!(ws.lmap, o, eng.BSIZE, eng.r+1)
+    W=eng.W; out=Matrix{Float64}(undef, W, W)
+    @inbounds for j in 1:W, i in 1:W
+        out[i,j] = ws.C[ws.lmap[i], ws.lmap[j]]
+    end
+    # ws.C is left rotated by the ring pass; restore canonical layout so a
+    # repeated in-place call (src === ws.C) starts from valid data again
+    src === ws.C && copyto!(ws.C, out)
+    out
+end
+
+# column-major upper-triangle vech index list (cache-friendly unpack: the
+# inner i-loop walks straight down a column of C)
+function _vech_idx(W)
+    idx=Vector{Tuple{Int,Int}}(undef, W*(W+1)÷2)
+    k=0
+    @inbounds for j in 1:W, i in 1:j
+        k+=1; idx[k]=(i,j)
+    end
+    idx
+end
+
+# pack the rotated ring buffer into canonical vech order, iterating over the
+# PHYSICAL upper triangle (sequential, cache-friendly reads of C; the vech
+# position is recovered through the inverse column map — scattered writes are
+# far cheaper than the scattered reads of a logical-order gather)
+function _pack_ring(C, imap, Nv)
+    v=zeros(Nv); W=length(imap)
+    @inbounds for pj in 1:W
+        j0=imap[pj]
+        for pi in 1:pj
+            i0=imap[pi]
+            i,j = i0<=j0 ? (i0,j0) : (j0,i0)
+            v[(j*(j-1))>>1 + i] = C[pi,pj]
+        end
+    end
+    v
+end
+_inv_lmap(lmap) = (imap=similar(lmap); @inbounds for c in eachindex(lmap); imap[lmap[c]]=c; end; imap)
+
 function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=30)
+    haskey(eng, :ops) || return _rho_H_krylov_v9m_ref(eng; tol=tol, krylovdim=krylovdim)
+    W=eng.W; B=eng.BSIZE; nblk=eng.r+1
+    idx=_vech_idx(W); Nv=length(idx)
+    ws=V9Workspace(eng)
+    lmap=_fill_lmap!(ws.lmap, mod(-eng.p, nblk), B, nblk)   # same offset every matvec
+    imap=_inv_lmap(lmap)
+    C=ws.C
+    unpack!(v)=(@inbounds for k in 1:Nv;(i,j)=idx[k];C[i,j]=v[k];C[j,i]=v[k];end)
+    fill!(C,0.0); _applyH_period_ring!(ws,eng); D=_pack_ring(C,imap,Nv)   # affine offset H(0)
+    function op(v)
+        unpack!(v); _applyH_period_ring!(ws,eng); _pack_ring(C,imap,Nv) .- D
+    end
+    x0=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k]; i==j && (x0[k]=1.0); end
+    # eager: stop as soon as the dominant eigenpair meets tol instead of always
+    # building the full krylovdim-dimensional basis (halves the matvec count)
+    vals,_,_=KrylovKit.eigsolve(op,x0,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),
+                                maxiter=300,eager=true)
+    maximum(abs.(vals))
+end
+
+# reference path (used only if an engine lacks precomputed ops)
+function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=30)
     W=eng.W
     idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
     Nv=length(idx)
@@ -826,6 +1182,26 @@ function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=30)
 end
 
 function fixPoint_v9m(eng; tol=1e-11, krylovdim=30)
+    haskey(eng, :ops) || return _fixPoint_v9m_ref(eng; tol=tol, krylovdim=krylovdim)
+    W=eng.W; B=eng.BSIZE; nblk=eng.r+1
+    idx=_vech_idx(W); Nv=length(idx)
+    ws=V9Workspace(eng)
+    lmap=_fill_lmap!(ws.lmap, mod(-eng.p, nblk), B, nblk)
+    imap=_inv_lmap(lmap)
+    C=ws.C
+    unpack!(v)=(@inbounds for k in 1:Nv;(i,j)=idx[k];C[i,j]=v[k];C[j,i]=v[k];end)
+    fill!(C,0.0); _applyH_period_ring!(ws,eng); dvec=_pack_ring(C,imap,Nv)
+    Hlin(v)=(unpack!(v); _applyH_period_ring!(ws,eng); _pack_ring(C,imap,Nv) .- dvec)
+    sol,info=KrylovKit.linsolve(v->v .- Hlin(v), dvec, dvec; tol=tol,
+                                krylovdim=min(krylovdim,Nv), maxiter=300)
+    info.converged==0 && @warn "fixPoint_v9m: not fully converged" info
+    Cout=zeros(W,W)
+    @inbounds for k in 1:Nv; (i,j)=idx[k]; Cout[i,j]=sol[k]; Cout[j,i]=sol[k]; end
+    Cout
+end
+
+# reference fixpoint path (used only if an engine lacks precomputed ops)
+function _fixPoint_v9m_ref(eng; tol=1e-11, krylovdim=30)
     W=eng.W
     idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
     Nv=length(idx)
