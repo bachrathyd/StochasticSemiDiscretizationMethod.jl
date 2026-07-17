@@ -26,6 +26,7 @@ julia --project=benchmark -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate(
 | Beam modal-convergence study | `benchmark_beam_fe.jl`, `plot_beam_fe_pub.jl` |
 | 2-DOF SSV milling stability & quality chart | `ssv2dof_chart.jl` (variance colormap + stochastic boundaries), `ssv2_det_curves.jl` (deterministic boundaries), `plot_ssv2.jl` (render) |
 | SSV Monte-Carlo validation | `ssv2_mc_validation.jl` |
+| Cross-validation vs the discretization-free approach (Iklodi & Dankowicz, arXiv:2607.01374) | `cmp_turning.jl` (turning second-moment lobe + timing), `cmp_accuracy.jl` (scalar accuracy vs their exact χ=0 boundary), `cmp_figure.jl` (combined figure) |
 
 The final data behind each chart is stored next to the scripts as `.csv`, so the
 `plot_*` scripts reproduce the figures in seconds without re-running the
