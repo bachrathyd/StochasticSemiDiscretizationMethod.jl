@@ -38,18 +38,68 @@ var = stationaryVariance(prob, T, p;    method = GaussLegendre(3))
 ρsd = spectralRadiusOfMoment(prob, T, p; method = ClassicalSD(2))     # classical, for reference
 ```
 
-Accuracy vs CPU time in ρ(𝓗) on a delayed-PD stochastic Mathieu oscillator
-(reproduce with [`examples/plot_highorder_wp.jl`](examples/plot_highorder_wp.jl)):
+Accuracy (error in ρ(𝓗)) vs CPU time on a **critical** delayed Mathieu oscillator
+— high natural frequency (ωn = 5), so the delay spans ~5 oscillations and many
+discretization points are genuinely needed. Collocation orders GL1–GL5 (order
+2–10) are shown from `p = 1`, so the full convergence onset is visible; timing is
+measured with BenchmarkTools (reproduce with
+[`examples/plot_highorder_wp.jl`](examples/plot_highorder_wp.jl)):
 
 ![](./assets/HighOrderConvergence.png)
 
-The collocation blocks reach error levels the classical first-order scheme cannot
-attain at any practical step count. At **loose tolerances** the fast
-multiplication-free / Kronecker-factored classical path is the economical choice
-(and the only one that scales to high state dimension); at **tight tolerances**
-the high-order collocation wins — far more digits per unit accuracy. The current
-collocation backend is a straightforward reference implementation and is not yet
-performance-tuned.
+Both backends are performance-tuned. The collocation engine precomputes the
+per-step noise block (a fixed linear operator that a naive implementation
+rebuilds on every Krylov iteration) and applies the one-period covariance map on
+an allocation-free block ring buffer; the classical multiplication-free /
+Kronecker-factored kernel dispatches to an inlined StaticArrays fast path for
+small state dimension (`d ≤ 8`), removing the per-block `mul!` call overhead that
+dominates at `d = 2` — so the whole diagram fits in milliseconds-to-≈1 s. The
+**slope of each curve is its order** (2, 4, 6, 8, 10): the higher the order, the
+faster the error falls per unit CPU, and the high orders (GL3–GL5) dive below
+every other method once the tolerance tightens. Note the honest nuance — with
+`ClassicalSD(2)` the classical scheme is genuinely ~2nd-order on this
+light-noise problem, so it stays competitive through the mid-range and only
+GL4/GL5 clearly dominate at tight tolerance (a problem with delayed
+*multiplicative* noise, β ≢ 0, would push the classical scheme back to first
+order, but that engages the slower non-pruned collocation path). For high state
+dimension (the collocation engine is limited to low/moderate `d`, a single delay
+and a single Wiener channel) the factored classical path is the only one that
+scales.
+
+### Automatic path selection — you never choose
+
+The engine reads the *structure* of your problem and always takes the fastest
+correct path; **there is nothing to configure**. The only choice that is yours is
+the accuracy target (the `method` keyword, e.g. `GaussLegendre(3)` for order 6
+vs `ClassicalSD(2)`) — everything below it is automatic and the answer is the
+same regardless:
+
+- **No delayed multiplicative noise (`β ≡ 0`)** — feedback control (P or PD),
+  regenerative machining with noise on the *present* cutting force, or any model
+  whose stochastic terms read only the present state. The collocation engine
+  detects this from the coefficients and **prunes** the covariance block from
+  `2S+2` to `S+2` sub-states: **≈2.6–2.8× less memory and ≈1.4× faster per
+  solve**. This is exactly the case in the figure above (a lightly-damped delayed
+  Mathieu), which is why GL5 reaches the solver floor within a few milliseconds.
+- **Delayed multiplicative noise (`β ≢ 0`)** — e.g. milling with force-coefficient
+  noise that also reads the *delayed* tool position. The full, unpruned block is
+  used automatically, at no overhead.
+
+The detection is a structural test of the coefficient functions — you pass your
+`LDDEProblem` and the best internal path runs. The result is **bit-identical**
+either way (verified to `10⁻¹³` on both `ρ(𝓗)` and the stationary variance): the
+pruning changes only the cost, never the number. On top of that, every path here
+is orders of magnitude cheaper than the classical explicit period product — the
+multiplication-free evaluation alone is ≈`8.5×10³` faster at `p = 192` (see the
+[paper](paper/)'s work-precision study).
+
+> **Timing tip.** These solvers do many small/thin matrix products, and default
+> multithreaded BLAS forks all its threads for each one — the fork/join overhead
+> then dominates, causing a sudden jump in CPU time at a resolution threshold
+> (and a large fixed floor at small step counts). Pin BLAS to one thread with
+> `using LinearAlgebra; BLAS.set_num_threads(1)` — it is both smoother and much
+> faster here. For stability-chart sweeps, keep BLAS single-threaded and
+> parallelise the outer parameter loop with Julia threads instead.
 
 Julia package to investigate the behaviour of the first and second moments of stochastic linear delay differential equations based on the paper 
 [1] [Stochastic semi‐discretization for linear stochastic delay differential equations](https://onlinelibrary.wiley.com/doi/abs/10.1002/nme.6076) and the book

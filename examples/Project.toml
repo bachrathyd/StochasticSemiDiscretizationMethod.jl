@@ -1,4 +1,5 @@
 [deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 DelaunayTriangulation = "927a84f5-c5f4-47a5-9785-b46e178433df"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 MDBM = "dd61e66b-39ce-57b0-8813-509f78be4b4d"

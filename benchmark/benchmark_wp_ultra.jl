@@ -18,7 +18,7 @@ const TCAP = 300.0
 const CSV  = joinpath(@__DIR__, "wp_ultra.csv")
 const PNG  = joinpath(@__DIR__, "wp_ultra.png")
 const PDF  = joinpath(@__DIR__, "wp_ultra.pdf")
-const PAPER_IMG = raw"C:\Users\mmuser\My Drive\BD\StochasticSemiDiscretizationMethod.jl\journal_paper\images"
+const PAPER_IMG = joinpath(@__DIR__, "..", "journal_paper", "images")  # local paper images
 
 # fully periodic stochastic delayed Mathieu (all matrices time-periodic)
 function lddep()

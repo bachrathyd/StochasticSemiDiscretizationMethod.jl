@@ -41,7 +41,7 @@ for (i,α_val) in enumerate(α_vals)
 end
 savefig(plt, joinpath(@__DIR__,"..","assets","sykora_fig4_pub.png"))
 savefig(plt, joinpath(@__DIR__,"..","assets","sykora_fig4_pub.pdf"))
-dst = raw"C:\Users\mmuser\My Drive\BD\StochasticSemiDiscretizationMethod.jl\journal_paper\images"
+dst = joinpath(@__DIR__, "..", "journal_paper", "images"); mkpath(dst)  # local paper images
 cp(joinpath(@__DIR__,"..","assets","sykora_fig4_pub.png"), joinpath(dst,"fig1_sykora_fig4_repro.png"); force=true)
 cp(joinpath(@__DIR__,"..","assets","sykora_fig4_pub.pdf"), joinpath(dst,"fig1_sykora_fig4_repro.pdf"); force=true)
 println("done — sykora fig4 restyled")

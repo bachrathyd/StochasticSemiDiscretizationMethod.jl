@@ -79,16 +79,46 @@ function tests()
         T = 1.0
         ρref = spectralRadiusOfMapping_collocation(prob, T, 64; S=3)
         @test 0.0 < ρref < 1.0
-        # measured convergence order ≈ 2S for S = 1, 2, 3
+        # measured convergence order ≈ 2S for S = 1, 2, 3.
+        # Use coarse resolutions p = 4, 8: at S = 3 (order 6) the error already
+        # bottoms out at the ρref floor (~1e-12) by p ≈ 12, so a finer p_hi makes
+        # the Richardson order estimate meaningless floating-point noise. At p = 8
+        # the S = 3 error is still ~1e-9 (≈100× above the floor), giving a genuine
+        # order measurement (S=1,2,3 → 1.99, 4.00, 6.03).
         for S in (1, 2, 3)
-            e_lo = abs(spectralRadiusOfMapping_collocation(prob, T, 6; S=S) - ρref)
-            e_hi = abs(spectralRadiusOfMapping_collocation(prob, T, 24; S=S) - ρref)
-            order = log(e_lo / e_hi) / log(24 / 6)
+            e_lo = abs(spectralRadiusOfMapping_collocation(prob, T, 4; S=S) - ρref)
+            e_hi = abs(spectralRadiusOfMapping_collocation(prob, T, 8; S=S) - ρref)
+            order = log(e_lo / e_hi) / log(8 / 4)
             @test isapprox(order, 2S; atol=0.4)
         end
         # stationary variance is finite and positive
         Var = fixPointOfMapping_collocation(prob, T, 32; S=3)[1, 1]
         @test isfinite(Var) && Var > 0
+    end
+
+    @testset "collocation precomputed noise operator == reference (v9)" begin
+        # The per-step precomputed noise operator (the fast Krylov path) must
+        # reproduce the reference implementation that rebuilds noise_block every
+        # matvec, to solver tolerance — on a random symmetric covariance.
+        SSM = StochasticSemiDiscretizationMethod
+        Afun(t) = @SMatrix [0.0 1.0; -(1.0+0.5cos(2π*t)) -0.4]
+        Bfun(t) = @SMatrix [0.0 0.0; 0.20*(1+0.3cos(2π*t)) 0.0]
+        αfun(t) = @SMatrix [0.0 0.0; 0.30 0.0]
+        βfun(t) = @SMatrix [0.0 0.0; 0.0 0.0]           # β ≡ 0 ⇒ pruned v9 engine
+        prob = LDDEProblem(ProportionalMX(Afun), [DelayMX(1.0, Bfun)],
+            [stCoeffMX(1, ProportionalMX(αfun))], [stCoeffMX(1, DelayMX(1.0, βfun))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        eng = SSM.build_v9m(SSM._collocation_prob(prob, 1.0), 3, 16)
+        W = eng.W
+        Rm = randn(W, W); C = (Rm + Rm') / 2
+        slow = SSM._applyH_v9m_slow(eng, C)             # rebuild-every-call reference
+        fast = SSM.applyH_v9m(eng, C)                   # precomputed-ops path
+        scale = max(1.0, maximum(abs, slow))
+        @test maximum(abs, fast - slow) < 1e-9 * scale
+        ws = SSM.V9Workspace(eng)                       # ring-buffer workspace path
+        copyto!(ws.C, C)
+        res = SSM._applyH_period!(ws, eng, ws.C)
+        @test maximum(abs, res - slow) < 1e-9 * scale
     end
 
     @testset "Unified method selection (collocation vs classical SD)" begin

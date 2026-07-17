@@ -3,6 +3,7 @@ using StaticArrays
 using MDBM
 using Plots
 using LaTeXStrings
+using LinearAlgebra; BLAS.set_num_threads(1)   # small/thin solves: single-thread BLAS is faster
 
 gr();
 

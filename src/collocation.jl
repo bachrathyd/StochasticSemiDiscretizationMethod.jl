@@ -41,9 +41,11 @@ restricts the method to low/moderate state dimension.
 `period` is the principal period ``T``; `n_steps` is the number of steps ``p`` per
 period; the delay ``\\tau`` is read from `prob` and must satisfy ``\\tau = r\\,(T/p)``
 for an integer ``r \\ge 1``. The engine automatically reduces the block size when
-there is no delayed multiplicative noise (``\\beta \\equiv 0``); pass `force=true`
-to keep the full block. Extra `kwargs` (`tol`, `krylovdim`) go to the KrylovKit
-eigensolver.
+there is no delayed multiplicative noise (``\\beta \\equiv 0``) and falls back to
+the full block otherwise. `force=true` forces the *pruned* engine even when
+``\\beta \\not\\equiv 0`` — the delayed multiplicative noise is then **ignored**
+(a warning is emitted); use it for diagnostics only. Extra `kwargs` (`tol`,
+`krylovdim`) go to the KrylovKit eigensolver.
 
 Supports a single delay and a single Wiener channel.
 """
