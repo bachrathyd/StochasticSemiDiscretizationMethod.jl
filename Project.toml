@@ -1,7 +1,7 @@
 name = "StochasticSemiDiscretizationMethod"
 uuid = "048039a2-5e1a-11e9-0eb6-5da22298fca4"
-authors = ["Henrik T. Sykora <henrik1991@gmail.com>", "Dániel Bachrathy <bachrathy@mm.bme.hu>"]
 version = "1.0.0"
+authors = ["Henrik T. Sykora <henrik1991@gmail.com>", "Dániel Bachrathy <bachrathy@mm.bme.hu>"]
 
 [deps]
 Arpack = "7d9fca2a-8960-54d3-9f78-7d1dccf2cb97"
@@ -25,7 +25,7 @@ StochasticSemiDiscretizationMethodCUDAExt = "CUDA"
 
 [compat]
 Arpack = "0.5"
-CUDA = "5"
+CUDA = "5, 6"
 InteractiveUtils = "1"
 IterativeSolvers = "0.9"
 KrylovKit = "0.8, 0.9, 0.10"
