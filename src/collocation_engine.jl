@@ -1499,15 +1499,20 @@ function build_vT(pb::ProbT, S, p; force=false, want_U::Bool=false)
               "multiplicative noise is IGNORED — diagnostics only, ρ will be wrong" maxlog=1
     end
     a,b,c=gl_tab(S); h=pb.T/p
+    pb.τmin > 0.0 ||
+        error("the delay must be positive: sampled min τ(t) = $(pb.τmin) ≤ 0")
     pb.τmin >= h*(1.0-1e-12) ||
         error("time-varying delay requires τ(t) ≥ h = T/n_steps: sampled min τ = " *
               "$(pb.τmin) < h = $h — use n_steps ≥ $(ceil(Int, pb.T/pb.τmin))")
-    # smoothness/monotonicity of the reading map ξ(t)=t−τ(t), 16× oversampled
+    # monotonicity of the reading map ξ(t)=t−τ(t), 16× oversampled. The bound is
+    # ONE-SIDED: only τ′ ≤ 0.9 is required (ξ′ ≥ 0.1); the delay may DECREASE
+    # arbitrarily fast (ξ′ > 1 merely stretches the reading image over more blocks).
     for k in 0:16p-1
         t=(k+0.5)/(16p)*pb.T
         ξp=1.0-_dtau(pb.τf, t)
         ξp >= 0.1 || error("reading map ξ(t)=t−τ(t) must be uniformly increasing: " *
-                           "ξ′($t) = $ξp < 0.1 (|τ′| too large for this engine)")
+                           "ξ′($t) = $ξp < 0.1, i.e. τ′(t) > 0.9 — the delay grows " *
+                           "almost as fast as time advances; not supported")
     end
     maximum(abs(pb.τf(k/64*pb.T + pb.T) - pb.τf(k/64*pb.T)) for k in 0:63) <=
         1e-9*max(pb.τmax,1.0) ||
@@ -1517,6 +1522,11 @@ function build_vT(pb::ProbT, S, p; force=false, want_U::Bool=false)
     r_buf=ceil(Int, pb.τmax/h - 1e-12) + 1
     # ---- global reading-image points q[n][i] = ξ(t_n + θoffs[i]·h), θoffs=[0;c;1]
     θoffs=vcat(0.0, c, 1.0)
+    # NOTE: absolute θ-tolerances (boundary snap 1e-9, breakpoint dedup/lookup
+    # 1e-8) put an ~1e-8·h floor on distinguishable reading images, and the u/h
+    # float split loses θ precision as eps·(τ/h) — for extreme τ/h (≳1e5) these
+    # scales meet. Self-consistent (merged images perturb a read limit by ≤1e-8·h,
+    # never O(1)), but superconvergence below that floor is not observable.
     tolθ=1e-9
     # locate u on the mesh: absolute block j (covers [(j−1)h, jh]) + snapped θpos
     function locate(u)

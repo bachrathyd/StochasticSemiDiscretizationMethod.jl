@@ -145,7 +145,8 @@ aligning `n_steps` — often the better fix:
 
 Pass the delay as a **function** — that is the entire difference. Requirements:
 `τ(t) ≥ Δt` (an error reports the minimum `n_steps`), `τ` T-periodic and
-smooth, `ξ(t) = t − τ(t)` increasing (`|τ′| < 0.9`):
+smooth, `ξ(t) = t − τ(t)` increasing — a **one-sided** bound `τ′(t) ≤ 0.9`
+(the delay may *decrease* arbitrarily fast):
 
 ```julia
 τfun(t) = 0.45 + 0.08sin(2π*t)              # e.g. spindle-speed variation

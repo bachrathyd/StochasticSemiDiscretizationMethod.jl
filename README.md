@@ -130,10 +130,11 @@ Two structural points worth internalizing:
   rough and smooth reads converge at the same rate — also with the time-varying
   delay engine.
 - **Measured, not just promised.** On the spindle-speed-variation (SSV) turning
-  model (sinusoidal `τ(t)`, delay spanning ≈5–8 steps), the measured orders
-  against an independent classical reference are **3.5 at `S=2`** and **5.9 at
-  `S=3`** — at or near the superconvergent `2S`, well above the guaranteed
-  `S+1` floor (reproduce with
+  model (sinusoidal `τ(t)`, delay spanning ≈5–8 steps), the measured orders are
+  **3.5 at `S=2`** and **5.9 at `S=3`** — at or near the superconvergent `2S`,
+  well above the guaranteed `S+1` floor. (Reference: Richardson extrapolation of
+  the finest ladder, cross-validated against the independently extrapolated
+  classical path to `8×10⁻⁸` relative; reproduce with
   [`benchmark/ssv_timevarying_orders.jl`](benchmark/ssv_timevarying_orders.jl)):
 
 ![](./assets/TimeVaryingDelayConvergence.png)
@@ -194,15 +195,18 @@ runs and a warning suggests the aligning `n_steps` (often the better fix):
 
 Pass the delay as a **function** — that is the entire difference. Requirements:
 `τ(t) ≥ Δt` (an error reports the minimum `n_steps`), `τ` T-periodic and smooth,
-and `ξ(t) = t − τ(t)` increasing (|τ′| < 0.9). SSV turning, for example:
+and `ξ(t) = t − τ(t)` increasing — a **one-sided** bound `τ′(t) ≤ 0.9`; the
+delay may *decrease* arbitrarily fast:
 
 ```julia
-τfun(t) = 2π / (Ω0 * (1 + RVA * sin(RVF * t)))     # spindle-speed variation
+τfun(t) = 0.45 + 0.08sin(2π*t)                     # smooth, T-periodic, ≥ Δt
 ρ   = spectralRadiusOfMoment(mkprob(τfun, B), T, p)
 var = stationaryVariance(mkprob(τfun, B), T, p)
 ```
 
-Rough reads (`Bpd` above) work identically with `τfun` — same order.
+(For real spindle-speed variation the same pattern reads
+`τ(t) = (2π/z)/Ω(t)` with `Ω(t) = Ω₀(1 + RVA·sin(2π t/T))` and `T` the
+modulation period.) Rough reads (`Bpd` above) work identically — same order.
 
 ### Delayed multiplicative noise (β ≢ 0)
 

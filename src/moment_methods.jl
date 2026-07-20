@@ -79,33 +79,44 @@ function _classical_result(prob::LDDEProblem, period::Real, n_steps::Integer, q:
 end
 
 # Collocation applicability: returns `nothing` when the collocation engines can
-# handle `prob`, else a human-readable reason for the classical fallback.
-function _collocation_blocked(prob::LDDEProblem, period::Real)
+# handle `prob` at this resolution, else a human-readable reason for the
+# classical fallback. The fractional-limit (vT) engine requires β ≡ 0, so any
+# non-aligned delay (function-valued OR grid-misaligned constant) combined with
+# delayed multiplicative noise must fall back.
+function _collocation_blocked(prob::LDDEProblem, period::Real, n_steps::Integer)
     length(prob.Bs) == 1 || return "multiple delay terms ($(length(prob.Bs)))"
     (length(prob.αs) ≤ 1 && length(prob.βs) ≤ 1 && length(prob.σs) ≤ 1) ||
         return "multiple Wiener channels"
-    τraw = prob.Bs[1].τ.τ
-    if !(τraw isa Real) && !isempty(prob.βs)
-        for k in 0:63
-            t = (k + 0.5) / 64 * float(period)
-            if maximum(abs, Matrix{Float64}(prob.βs[1](t))) > 1e-14
-                return "a function-valued delay combined with delayed multiplicative noise (β ≢ 0)"
-            end
+    βnz = !isempty(prob.βs) && any(
+        maximum(abs, Matrix{Float64}(prob.βs[1]((k + 0.5) / 64 * float(period)))) > 1e-14
+        for k in 0:63)
+    if βnz
+        τraw = prob.Bs[1].τ.τ
+        if !(τraw isa Real)
+            return "a function-valued delay combined with delayed multiplicative noise (β ≢ 0)"
+        elseif _aligned_r(float(τraw), float(period), n_steps) == 0
+            return "a grid-misaligned constant delay combined with delayed multiplicative " *
+                   "noise (β ≢ 0; choose n_steps with τ·n_steps/T integer to use the " *
+                   "aligned collocation engine)"
         end
     end
     nothing
 end
 
-# class-6 fallback: Collocation requested but not applicable → classical path
-function _collocation_or_fallback(f_colloc, f_classical, prob, T, m::Collocation,
+# fallback: Collocation requested but not applicable → classical path. NOTE:
+# collocation-specific kwargs (tol, krylovdim, force) are NOT forwarded — the
+# classical solvers have different keyword surfaces, and the user tuned them
+# for the collocation path anyway.
+function _collocation_or_fallback(f_colloc, f_classical, prob, T, p, m::Collocation,
                                   verbosity::Integer)
-    blocked = _collocation_blocked(prob, T)
+    blocked = _collocation_blocked(prob, T, p)
     blocked === nothing && return f_colloc()
     verbosity ≥ 1 &&
         @warn "Collocation($(m.S)) (order up to $(2m.S)) is not applicable to this " *
               "problem: $blocked. Falling back to the classical multiplication-free " *
               "factored semi-discretization (ClassicalSD(2), first order in the " *
-              "second moment). (suppress with verbosity=0)" maxlog=1
+              "second moment); collocation-specific keyword arguments are ignored. " *
+              "(suppress with verbosity=0)" maxlog=1
     f_classical()
 end
 
@@ -131,8 +142,8 @@ _spectral_moment(prob, T, p, m::Collocation; verbosity::Integer=1, kwargs...) =
     _collocation_or_fallback(
         () -> spectralRadiusOfMapping_collocation(prob, T, p; S=m.S,
                                                   verbosity=verbosity, kwargs...),
-        () -> _spectral_moment(prob, T, p, ClassicalSD(2); kwargs...),
-        prob, T, m, verbosity)
+        () -> _spectral_moment(prob, T, p, ClassicalSD(2)),   # kwargs NOT forwarded
+        prob, T, p, m, verbosity)
 _spectral_moment(prob, T, p, m::ClassicalSD; verbosity::Integer=1, kwargs...) =
     spectralRadiusOfMapping_MF_factored(_classical_result(prob, T, p, m.q; additive=false); kwargs...)
 
@@ -153,8 +164,8 @@ _stationary_var(prob, T, p, m::Collocation; verbosity::Integer=1, kwargs...) =
     _collocation_or_fallback(
         () -> fixPointOfMapping_collocation(prob, T, p; S=m.S,
                                             verbosity=verbosity, kwargs...)[1, 1],
-        () -> _stationary_var(prob, T, p, ClassicalSD(2); kwargs...),
-        prob, T, m, verbosity)
+        () -> _stationary_var(prob, T, p, ClassicalSD(2)),    # kwargs NOT forwarded
+        prob, T, p, m, verbosity)
 _stationary_var(prob, T, p, m::ClassicalSD; verbosity::Integer=1, kwargs...) =
     fixPointOfMapping_MF_factored(_classical_result(prob, T, p, m.q; additive=true); kwargs...)[1]
 

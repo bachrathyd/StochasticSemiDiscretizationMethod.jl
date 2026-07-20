@@ -243,9 +243,44 @@ function tests()
         # τ(t) < Δt: n_steps below the admissible minimum
         @test_throws ErrorException spectralRadiusOfMapping_collocation(
             mkprob(τfun), T, 4; S=2, verbosity=0)
-        # non-monotone reading map (|τ′| too large)
+        # non-monotone reading map (τ′ > 0.9); τmin = 0.3 > Δt so this genuinely
+        # reaches the ξ′ check, not the τ ≥ Δt guard
         @test_throws ErrorException spectralRadiusOfMapping_collocation(
-            mkprob(t -> 0.3 + 0.25sin(2π*t)), T, 16; S=2, verbosity=0)
+            mkprob(t -> 0.5 + 0.2sin(2π*t)), T, 16; S=2, verbosity=0)
+        # misaligned constant delay + β ≢ 0: unified API falls back to classical
+        # (regression for the erroring middle class), and collocation-only kwargs
+        # are ignored on the fallback path rather than crashing the classical solver
+        βmis = LDDEProblem(ProportionalMX(Afun), [DelayMX(0.501, Bpos)],
+            [stCoeffMX(1, ProportionalMX(αfun))],
+            [stCoeffMX(1, DelayMX(0.501, t -> @SMatrix [0.0 0.0; 0.1 0.0]))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        ρ_mfb = spectralRadiusOfMoment(βmis, T, 100; method=Collocation(3),
+                                       verbosity=0, tol=1e-9, force=true)
+        ρ_mcd = spectralRadiusOfMoment(βmis, T, 100; method=ClassicalSD(2))
+        @test isapprox(ρ_mfb, ρ_mcd; rtol=1e-9)
+        v_mfb = stationaryVariance(βmis, T, 100; method=Collocation(3),
+                                   verbosity=0, tol=1e-9)
+        @test isfinite(v_mfb) && v_mfb > 0
+
+        # (e) HARD-REGIME ANCHORS (reviewer round 1)
+        # noise-off gate on a genuinely time-varying configuration: ρ(H) = ρ(U)²
+        pbT = SSM.ProbT(2, 1.0, t -> 0.45 + 0.08sin(2π*t), 0.37, 0.53,
+                        t -> Matrix(Afun(t)), t -> Matrix(Bpos(t)),
+                        t -> zeros(2, 2), t -> zeros(2, 2))
+        engT = SSM.build_vT(pbT, 2, 12; want_U=true)
+        @test isapprox(SSM.rho_H_krylov_v9m(engT), SSM.rho_U_vT(engT)^2; rtol=1e-10)
+        # delay longer than the period (r_buf > p: residue classes reused in-window)
+        ρ9L = spectralRadiusOfMapping_collocation(mkprob(1.5), T, 8; S=2)
+        ρTL = spectralRadiusOfMapping_collocation(mkprob(t -> 1.5), T, 8; S=2,
+                                                  verbosity=0)
+        @test isapprox(ρ9L, ρTL; rtol=1e-10)
+        # fast-DECREASING delay (τ′ ≈ −1.1 ⇒ ξ′ up to ≈2.1, 3-block reading spans;
+        # allowed — the τ′ ≤ 0.9 bound is one-sided)
+        τfast(t) = 0.45 + 0.12sin(2π*t) - 0.03sin(4π*t)
+        ρ_fast = spectralRadiusOfMapping_collocation(mkprob(τfast), T, 16; S=2,
+                                                     verbosity=0)
+        ρ_fcl = spectralRadiusOfMoment(mkprob(τfast), T, 400; method=ClassicalSD(2))
+        @test isapprox(ρ_fast, ρ_fcl; rtol=1e-2)
     end
 
     @testset "time-periodic (cyclostationary) variance profile" begin
