@@ -64,6 +64,33 @@ rst = StochasticSemiDiscretizationMethod.calculateResults(
 var_x = fixPointOfMapping_MF_factored(rst)[1]
 ```
 
+## High-order collocation (recommended for tight tolerances)
+
+The Gauss–Legendre collocation solver reaches order ``2S`` in the second moment.
+`S = 3` (order 6) is a good default. It takes the principal period `T` and the
+number of steps `p` per period (with the delay ``\tau = r\,(T/p)`` for integer
+`r`).
+
+```julia
+using StochasticSemiDiscretizationMethod, StaticArrays
+
+# delayed-PD-drift stochastic Mathieu oscillator (τ = T = 1), additive noise
+A(t) = @SMatrix [0.0 1.0; -(1.0 + 0.5cos(2π*t)) -0.4]
+B(t) = @SMatrix [0.0 0.0; 0.20*(1 + 0.3cos(2π*t)) 0.12*(1 + 0.4cos(2π*t))]
+α(t) = @SMatrix [0.0 0.0; 0.30 0.0]
+β(t) = @SMatrix [0.0 0.0; 0.0  0.0]
+prob = LDDEProblem(ProportionalMX(A), [DelayMX(1.0, B)],
+    [stCoeffMX(1, ProportionalMX(α))], [stCoeffMX(1, DelayMX(1.0, β))],
+    Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+
+T = 1.0
+ρ     = spectralRadiusOfMapping_collocation(prob, T, 12; S = 3)   # order 6 in ~12 steps
+var_x = fixPointOfMapping_collocation(prob, T, 12; S = 3)[1, 1]
+```
+
+A handful of steps at `S = 3` already matches what the classical scheme needs
+hundreds of steps to reach.
+
 ## Choosing the CPU or GPU backend automatically
 
 ```julia

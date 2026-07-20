@@ -13,8 +13,19 @@ using PrecompileTools: @setup_workload, @compile_workload
     @compile_workload begin
         rst = calculateResults(prob, SemiDiscretization(1, 2π / 6), 2π;
                                n_steps = 6, calculate_additive = true)
-        spectralRadiusOfMapping_MF_factored(rst)
+        spectralRadiusOfMapping_MF_factored(rst)      # d ≤ 8 → static fast path
         fixPointOfMapping_MF_factored(rst)
+        # the d-generic Matrix kernel (the d > 8 route) is no longer reached
+        # through the public call above — precompile it directly on the same
+        # tiny problem so large-d users keep a fast first call
+        let d = 2, r = div(rst.n, d) - 1,
+            cf = get_factored_coefficients(rst; include_additive = true),
+            ws = MFFactoredWorkspace(d, r),
+            D1 = (r + 1) * d, D2 = CovVecIdx(D1).sectionStarts[end]
+            apply_mapping_M2_factored!(ws, cf, rst, zeros(D2), zeros(D1);
+                                       include_additive = true)
+            apply_mapping_M1_factored!(ws, cf, rst, zeros(D1); include_additive = true)
+        end
         dm = DiscreteMapping_M2_MF(rst)
         spectralRadiusOfMapping_MF(dm)
         fixPointOfMapping_MF(dm)

@@ -27,3 +27,6 @@ examples/*.pdf
 coverage/
 .DS_Store
 Thumbs.db
+
+# mf-complexity sweep writes timestamped outputs to CWD
+benchmark_mf_complexity_*

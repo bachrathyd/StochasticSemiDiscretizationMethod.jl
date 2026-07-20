@@ -194,7 +194,9 @@ for nm in (1, 2, 3, 4, 6, 8, 12, 16)
             annotate!(plt, rr.nm, rr.ρ, text(@sprintf(" d=%d, %.0fs", rr.d, rr.t), 8, :left))
         end
         savefig(plt, joinpath(@__DIR__,"beam_fe.png"))
-        savefig(plt, raw"C:\Users\mmuser\My Drive\BD\StochasticSemiDiscretizationMethod.jl\journal_paper\images\beam_mesh_convergence.png")
+        let img=joinpath(@__DIR__,"..","journal_paper","images"); mkpath(img)  # local paper images
+            savefig(plt, joinpath(img,"beam_mesh_convergence.png"))
+        end
     end
 end
 println("done — benchmark/beam_fe.csv, beam_fe.png (+ paper images)")

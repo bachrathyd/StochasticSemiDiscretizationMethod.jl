@@ -58,13 +58,33 @@ M   = fixPointOfMapping_MF_factored(rst)          # stationary covariance (vech)
 var_x = M[1]                                       # stationary variance of x₁
 ```
 
-## Which solver should I use?
+## Choosing a method
+
+The quickest way in is the unified interface with a method selector — high-order
+Gauss–Legendre collocation by default:
+
+```julia
+ρ   = spectralRadiusOfMoment(prob, period, n_steps; method = GaussLegendre(3))  # order 6
+var = stationaryVariance(prob, period, n_steps;    method = GaussLegendre(3))
+# swap in the classical semi-discretization for a reference/cross-check:
+ρsd = spectralRadiusOfMoment(prob, period, n_steps; method = ClassicalSD(2))
+```
+
+### Methods and their second-moment convergence order
+
+| Method | Selector | 2nd-moment order | Best for |
+|--------|----------|:----------------:|----------|
+| Gauss–Legendre collocation | [`Collocation`](@ref)`(S)` / `GaussLegendre(S)` | **2S** (6 at `S=3`) | tight tolerances, low/moderate `d` (**default**) |
+| Classical semi-discretization | [`ClassicalSD`](@ref)`(q)` | 1 (any `q`) | reference/cross-check; high `d` via the factored operator |
+
+### Lower-level building blocks
 
 | Situation | Function |
 |-----------|----------|
 | Small step count `p`, reference/debug | [`spectralRadiusOfMapping`](@ref), [`fixPointOfMapping`](@ref) on [`DiscreteMapping_M2`](@ref) |
 | Large `p`, moderate state dimension `d` | [`spectralRadiusOfMapping_MF`](@ref), [`fixPointOfMapping_MF`](@ref) |
 | Large `p` **and** large `d` (up to hundreds of DOF) | [`spectralRadiusOfMapping_MF_factored`](@ref), [`fixPointOfMapping_MF_factored`](@ref) |
+| High order in low/moderate `d` | [`spectralRadiusOfMapping_collocation`](@ref), [`fixPointOfMapping_collocation`](@ref) |
 | Very large problems with a CUDA GPU | [`spectralRadiusOfMapping_GPU`](@ref), [`spectralRadiusOfMapping_auto`](@ref) |
 
 See the [Examples](examples.md) and the [API reference](api.md).

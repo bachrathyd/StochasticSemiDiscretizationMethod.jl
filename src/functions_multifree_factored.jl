@@ -302,6 +302,248 @@ function LinearAlgebra.mul!(y::AbstractVector, op::M1FactoredOperator, x::Abstra
     y .= apply_mapping_M1_factored!(op.ws, op.cf, op.rst, x, include_additive=false)
 end
 
+# ── static fast path for small d ─────────────────────────────────────────────
+# At small d the factored kernel is dominated not by flops but by dispatch:
+# every d×d `mul!` on a Matrix{Float64} costs ~100 ns of BLAS/generic-matmul
+# entry overhead versus ~4 ns for an inlined SMatrix product (measured at
+# d=2: one apply at p=200 spends 17.7 ms on 232k tiny gemms). The structures
+# below mirror the Matrix path 1:1 with SMatrix/SVector entries, so all block
+# products inline and the covariance window becomes a flat array of immutable
+# blocks. Semantics (circular indexing, staging of cross blocks, the diag
+# write LAST so it overwrites the mlag = n-r cross write, m_in/m_out packing)
+# are copied exactly from apply_mapping_M2_factored!/_M1_factored!; results
+# agree to summation-order rounding only. The Matrix path above remains the
+# reference and the d > 8 route (SMatrix compile cost/benefit flips there).
+
+struct MFFactoredCoefficientsS{d,L}
+    K::Int
+    det::Vector{Vector{Tuple{SMatrix{d,d,Float64,L}, Int}}}
+    stoch::Vector{Vector{Tuple{Vector{SMatrix{d,d,Float64,L}}, Int, Int}}}
+    detV::Vector{SVector{d,Float64}}
+    stochV::Vector{SMatrix{d,d,Float64,L}}
+    stochGV::Vector{Vector{Tuple{Vector{SMatrix{d,d,Float64,L}}, Vector{SVector{d,Float64}}, Int, Int}}}
+end
+
+function staticize(cf::MFFactoredCoefficients, ::Val{d}) where d
+    L = d * d
+    S = SMatrix{d,d,Float64,L}
+    V = SVector{d,Float64}
+    det = [Tuple{S,Int}[(S(A), k) for (A, k) in step] for step in cf.det]
+    stoch = [Tuple{Vector{S},Int,Int}[(S.(Gs), k, w) for (Gs, k, w) in step] for step in cf.stoch]
+    detV = V[V(x) for x in cf.detV]
+    stochV = S[S(M) for M in cf.stochV]
+    stochGV = [Tuple{Vector{S},Vector{V},Int,Int}[(S.(Gs), V.(gs), k, w) for (Gs, gs, k, w) in step]
+               for step in cf.stochGV]
+    return MFFactoredCoefficientsS{d,L}(cf.K, det, stoch, detV, stochV, stochGV)
+end
+
+struct MFStaticWorkspace{d,L}
+    # covariance window, (r+1)×(r+1) blocks, stored TRANSPOSED: C[b,a] holds the
+    # logical block C(a,b), so the hot cross-block sweep (fixed lag row, all m)
+    # walks a contiguous column instead of a strided row. Values are identical.
+    C::Matrix{SMatrix{d,d,Float64,L}}
+    v::Vector{SVector{d,Float64}}
+    Cnext::Vector{SMatrix{d,d,Float64,L}}     # staging row for the new cross blocks
+end
+function MFStaticWorkspace(::Val{d}, r::Int) where d
+    L = d * d
+    MFStaticWorkspace{d,L}(fill(zero(SMatrix{d,d,Float64,L}), r + 1, r + 1),
+                           fill(zero(SVector{d,Float64}), r + 1),
+                           fill(zero(SMatrix{d,d,Float64,L}), r + 1))
+end
+
+function apply_M2_static!(ws::MFStaticWorkspace{d,L}, cf::MFFactoredCoefficientsS{d,L},
+                          rst::AbstractResult, m_in::AbstractVector, v_in::AbstractVector;
+                          include_additive::Bool=false) where {d,L}
+    K = cf.K
+    r = div(rst.n, d) - 1
+    p = rst.n_steps
+    idx = CovVecIdx((r + 1) * d)
+    C = ws.C; v = ws.v; Cnext = ws.Cnext
+    c_idx(n) = mod(n, r + 1) + 1
+    # The circular index is walked with branch-wrapped cursors below (the hot
+    # loops carry no integer div); every cursor value equals the c_idx() of the
+    # Matrix path, and all block products accumulate in the same order, so the
+    # results are identical to summation rounding.
+
+    # unpack m_in → C, v_in → v  (SMatrix ntuple is column-major: (a,b) ↦ a+(b-1)d);
+    # idx is symmetric, so block(j,i) == block(i,j)' bitwise — read i ≤ j only
+    ci = 1                                        # c_idx(-i), decrementing
+    for i in 0:r
+        v[ci] = SVector{d,Float64}(ntuple(q -> v_in[i*d + q], Val(d)))
+        cj = ci                                   # c_idx(-j), j from i
+        for j in i:r
+            B = SMatrix{d,d,Float64,L}(
+                ntuple(t -> m_in[idx(i*d + ((t-1) % d + 1), j*d + ((t-1) ÷ d + 1))], Val(L)))
+            C[cj, ci] = B                         # transposed storage: [b,a] ↦ (a,b)
+            C[ci, cj] = B'
+            cj = cj == 1 ? r + 1 : cj - 1
+        end
+        ci = ci == 1 ? r + 1 : ci - 1
+    end
+
+    bn = 1                                        # c_idx(n), advanced per step
+    for n in 0:p-1
+        nn = n + 1
+        det_step = cf.det[nn]
+        stoch_step = cf.stoch[nn]
+        cn = bn == r + 1 ? 1 : bn + 1             # c_idx(n+1) == c_idx(n-r)
+
+        # v(n+1)
+        vnext = zero(SVector{d,Float64})
+        for (A, k) in det_step
+            row = bn - k; row > 0 || (row += r + 1)   # c_idx(n-k), 0 ≤ k ≤ r
+            vnext += A * v[row]
+        end
+        if include_additive && !isempty(cf.detV)
+            vnext += cf.detV[nn]
+        end
+
+        # cross blocks C(n+1, m) = Σ_k A_k C(n-k, m)  [+ detV v(m)' if additive]
+        for ii in 1:r+1
+            Cnext[ii] = zero(SMatrix{d,d,Float64,L})
+        end
+        for (A, k) in det_step
+            row = bn - k; row > 0 || (row += r + 1)
+            cm = cn                               # c_idx(mlag), mlag = n-r … n
+            for ii in 1:r+1
+                Cnext[ii] += A * C[cm, row]       # contiguous column sweep
+                cm = cm == r + 1 ? 1 : cm + 1
+            end
+        end
+        if include_additive && !isempty(cf.detV)
+            dvn = cf.detV[nn]
+            cm = cn
+            for ii in 1:r+1
+                Cnext[ii] += dvn * v[cm]'
+                cm = cm == r + 1 ? 1 : cm + 1
+            end
+        end
+
+        # diagonal C(n+1,n+1)
+        diag = zero(SMatrix{d,d,Float64,L})
+        # deterministic  Σ_{k,l} A_k C(n-k,n-l) A_l'
+        for (Ak, k) in det_step
+            row = bn - k; row > 0 || (row += r + 1)
+            for (Al, l) in det_step
+                col = bn - l; col > 0 || (col += r + 1)
+                diag += Ak * C[col, row] * Al'
+            end
+        end
+        # stochastic (factored)  Σ_{k,l:wk==wl} Σ_m G̃k^m C(n-k,n-l) G̃l^mᵀ
+        for (Gk, k, wk) in stoch_step
+            row = bn - k; row > 0 || (row += r + 1)
+            for (Gl, l, wl) in stoch_step
+                wk == wl || continue
+                col = bn - l; col > 0 || (col += r + 1)
+                Ckl = C[col, row]
+                for m in 1:K
+                    diag += Gk[m] * Ckl * Gl[m]'
+                end
+            end
+        end
+        if include_additive
+            if !isempty(cf.detV)
+                dv = cf.detV[nn]
+                fv = vnext - dv
+                diag += dv * fv' + fv * dv' + dv * dv'
+            end
+            if !isempty(cf.stochV)
+                diag += cf.stochV[nn]
+            end
+            for (Gsamp, gs, k, w) in cf.stochGV[nn]
+                row = bn - k; row > 0 || (row += r + 1)
+                vk = v[row]
+                for m in 1:K
+                    # term = (G̃^m v_k) g̃^mᵀ  + transpose
+                    Gv = Gsamp[m] * vk
+                    diag += Gv * gs[m]' + gs[m] * Gv'
+                end
+            end
+        end
+
+        # commit (diag write LAST: cn == c_idx(n-r) overwrites that cross write)
+        v[cn] = vnext
+        cm = cn
+        for ii in 1:r+1
+            C[cm, cn] = Cnext[ii]
+            C[cn, cm] = Cnext[ii]'
+            cm = cm == r + 1 ? 1 : cm + 1
+        end
+        C[cn, cn] = diag
+        bn = cn
+    end
+
+    # extract C → m_out: every half-vectorized slot has a unique (i≤j, a, b)
+    # source (i<j: whole block; i==j: a ≤ b), so undef is fully overwritten
+    m_out = Vector{Float64}(undef, length(m_in))
+    cpi = c_idx(p)                                # c_idx(p-i), decrementing
+    for i in 0:r
+        cpj = cpi                                 # c_idx(p-j), j from i
+        for j in i:r
+            Mat = C[cpj, cpi]
+            if i == j
+                for a in 1:d, b in a:d
+                    m_out[idx(i*d + a, j*d + b)] = Mat[a, b]
+                end
+            else
+                for a in 1:d, b in 1:d
+                    m_out[idx(i*d + a, j*d + b)] = Mat[a, b]
+                end
+            end
+            cpj = cpj == 1 ? r + 1 : cpj - 1
+        end
+        cpi = cpi == 1 ? r + 1 : cpi - 1
+    end
+    return m_out
+end
+
+function apply_M1_static!(ws::MFStaticWorkspace{d,L}, cf::MFFactoredCoefficientsS{d,L},
+                          rst::AbstractResult, v_in::AbstractVector; include_additive::Bool=false) where {d,L}
+    r = div(rst.n, d) - 1; p = rst.n_steps
+    v = ws.v; c_idx(n) = mod(n, r + 1) + 1
+    for i in 0:r
+        v[c_idx(-i)] = SVector{d,Float64}(ntuple(q -> v_in[i*d + q], Val(d)))
+    end
+    for n in 0:p-1
+        nn = n + 1
+        vnext = zero(SVector{d,Float64})
+        for (A, k) in cf.det[nn]; vnext += A * v[c_idx(n-k)]; end
+        if include_additive && !isempty(cf.detV); vnext += cf.detV[nn]; end
+        v[c_idx(nn)] = vnext
+    end
+    v_out = zeros(length(v_in))
+    for i in 0:r
+        vv = v[c_idx(p-i)]; for q in 1:d; v_out[i*d + q] = vv[q]; end
+    end
+    return v_out
+end
+
+struct MFStaticOperator{d,L} <: AbstractMatrix{Float64}
+    cf::MFFactoredCoefficientsS{d,L}; rst::Any; D::Int; ws::MFStaticWorkspace{d,L}
+end
+Base.size(op::MFStaticOperator) = (op.D, op.D)
+Base.size(op::MFStaticOperator, i::Int) = i <= 2 ? op.D : 1
+Base.eltype(op::MFStaticOperator) = Float64
+LinearAlgebra.issymmetric(op::MFStaticOperator) = false
+LinearAlgebra.ishermitian(op::MFStaticOperator) = false
+function LinearAlgebra.mul!(y::AbstractVector, op::MFStaticOperator{d}, x::AbstractVector) where d
+    y .= apply_M2_static!(op.ws, op.cf, op.rst, x, zeros(d*(div(op.rst.n, d))),
+                          include_additive=false)
+end
+
+struct M1StaticOperator{d,L} <: AbstractMatrix{Float64}
+    cf::MFFactoredCoefficientsS{d,L}; rst::Any; D::Int; ws::MFStaticWorkspace{d,L}
+end
+Base.size(op::M1StaticOperator) = (op.D, op.D)
+Base.size(op::M1StaticOperator, i::Int) = i <= 2 ? op.D : 1
+Base.eltype(op::M1StaticOperator) = Float64
+LinearAlgebra.issymmetric(op::M1StaticOperator) = false
+LinearAlgebra.ishermitian(op::M1StaticOperator) = false
+function LinearAlgebra.mul!(y::AbstractVector, op::M1StaticOperator, x::AbstractVector)
+    y .= apply_M1_static!(op.ws, op.cf, op.rst, x, include_additive=false)
+end
+
 # rst-first API: works directly from the Result, so it NEVER builds the dense
 # d²×d² coefficients (the DiscreteMapping_M2_MF constructor's get_all_coefficients
 # blows the StaticArrays "expression too large" limit at d ≳ 30). This is the
@@ -324,9 +566,19 @@ function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d}; args...) wh
     r = div(rst.n, d) - 1
     D = CovVecIdx((r+1)*d).sectionStarts[end]
     cf = get_factored_coefficients(rst; include_additive=false)
+    # eager: stop once the dominant eigenpair meets tol instead of always
+    # building the full krylovdim basis (≈ halves the matvec count); a
+    # user-passed `eager` in args still wins (later duplicate overrides)
+    if d <= 8
+        scf = staticize(cf, Val(d))
+        sws = MFStaticWorkspace(Val(d), r)
+        sop = MFStaticOperator(scf, rst, D, sws)
+        vals, _, _ = eigsolve(sop, rand(D), 1, :LM; eager=true, args...)
+        return abs(vals[1])
+    end
     ws = MFFactoredWorkspace(d, r)
     op = MFFactoredOperator(cf, rst, D, ws)
-    vals, _, _ = eigsolve(op, rand(D), 1, :LM; args...)
+    vals, _, _ = eigsolve(op, rand(D), 1, :LM; eager=true, args...)
     return abs(vals[1])
 end
 # convenience: build the Result and solve, bypassing dense coefficients entirely
@@ -356,6 +608,16 @@ function fixPointOfMapping_MF_factored(rst::AbstractResult{d}; args...) where d
     D1 = (r+1)*d
     D2 = CovVecIdx(D1).sectionStarts[end]
     cf = get_factored_coefficients(rst; include_additive=true)
+    if d <= 8
+        scf = staticize(cf, Val(d))
+        sws = MFStaticWorkspace(Val(d), r)
+        sop1 = M1StaticOperator(scf, rst, D1, sws)
+        sk1 = apply_M1_static!(sws, scf, rst, zeros(D1), include_additive=true)
+        sv_star = gmres(IMinusPhiOperator(sop1), sk1; reltol=1e-15, args...)
+        sk2 = apply_M2_static!(sws, scf, rst, zeros(D2), sv_star, include_additive=true)
+        sop2 = MFStaticOperator(scf, rst, D2, sws)
+        return gmres(IMinusPhiOperator(sop2), sk2; reltol=1e-15, args...)
+    end
     ws = MFFactoredWorkspace(d, r)
 
     op1 = M1FactoredOperator(cf, rst, D1, ws)
