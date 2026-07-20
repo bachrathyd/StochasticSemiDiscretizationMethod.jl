@@ -68,8 +68,9 @@ var_x = fixPointOfMapping_MF_factored(rst)[1]
 
 The Gauss–Legendre collocation solver reaches order ``2S`` in the second moment.
 `S = 3` (order 6) is a good default. It takes the principal period `T` and the
-number of steps `p` per period (with the delay ``\tau = r\,(T/p)`` for integer
-`r`).
+number of steps `p` per period; a constant delay aligned with the grid
+(``\tau = r\,(T/p)``, integer `r`) gets the full ``2S``, and other delay classes
+are dispatched automatically — see the sections below.
 
 ```julia
 using StochasticSemiDiscretizationMethod, StaticArrays
@@ -90,6 +91,96 @@ var_x = fixPointOfMapping_collocation(prob, T, 12; S = 3)[1, 1]
 
 A handful of steps at `S = 3` already matches what the classical scheme needs
 hundreds of steps to reach.
+
+## Delay classes — defining each variant properly
+
+The collocation interface detects the delay class from how the system is
+*defined*; nothing else changes. The mini-demos below share this prelude
+(1-DOF oscillator, `x = [position; velocity]`):
+
+```julia
+using StochasticSemiDiscretizationMethod, StaticArrays
+A(t) = @SMatrix [0.0 1.0; -(1.0 + 0.5cos(2π*t)) -0.4]
+α(t) = @SMatrix [0.0 0.0; 0.25 0.0]
+z2   = @SMatrix zeros(2, 2)
+σ    = @SVector [0.0, 0.3]
+T = 1.0; p = 16
+mkprob(τ, B; β = t -> z2) =
+    LDDEProblem(ProportionalMX(A), [DelayMX(τ, B)],
+                [stCoeffMX(1, ProportionalMX(α))], [stCoeffMX(1, DelayMX(τ, β))],
+                Additive(2), [stAdditive(1, Additive(σ))])
+```
+
+### Constant aligned delay, smooth read (order 2S)
+
+Delayed **position** feedback; `τ = 0.5 = 8·Δt` lands on the grid:
+
+```julia
+B(t) = @SMatrix [0.0 0.0; 0.2 0.0]          # reads x₁ (position) — smooth
+ρ = spectralRadiusOfMoment(mkprob(0.5, B), T, p)
+```
+
+### Constant aligned delay, rough read (still order 2S)
+
+Delayed **velocity** feedback (the delayed-D term of a PD controller): the read
+component is Wiener-driven ("rough"), but the integrated-history blocks keep
+the full order:
+
+```julia
+Bpd(t) = @SMatrix [0.0 0.0; 0.2 0.12]       # also reads x₂ (velocity) — rough
+ρ = spectralRadiusOfMoment(mkprob(0.5, Bpd), T, p)
+```
+
+### Constant misaligned delay (order in [S+1, 2S])
+
+`τ ≠ r·Δt` routes to the fractional-limit engine; the warning suggests the
+aligning `n_steps` — often the better fix:
+
+```julia
+ρ = spectralRadiusOfMoment(mkprob(0.618, B), T, p)                 # warns
+ρ = spectralRadiusOfMoment(mkprob(0.618, B), T, p; verbosity = 0)  # silent
+```
+
+### Time-periodic smooth delay (floor S+1, measured ≈ 2S)
+
+Pass the delay as a **function** — that is the entire difference. Requirements:
+`τ(t) ≥ Δt` (an error reports the minimum `n_steps`), `τ` T-periodic and
+smooth, `ξ(t) = t − τ(t)` increasing — a **one-sided** bound `τ′(t) ≤ 0.9`
+(the delay may *decrease* arbitrarily fast):
+
+```julia
+τfun(t) = 0.45 + 0.08sin(2π*t)              # e.g. spindle-speed variation
+ρ   = spectralRadiusOfMoment(mkprob(τfun, B), T, p)
+var = stationaryVariance(mkprob(τfun, B), T, p)
+```
+
+On the SSV turning model the measured orders are 3.5 at `S = 2` and 5.9 at
+`S = 3` — near the superconvergent `2S`, well above the guaranteed `S+1` floor.
+Rough reads (`Bpd`) work identically.
+
+### Delayed multiplicative noise (β ≢ 0)
+
+Fully supported with a **constant aligned** delay (the unpruned block is used
+automatically). With a **varying** delay this combination falls back to the
+classical factored path (order 1) with a warning:
+
+```julia
+βn(t) = @SMatrix [0.0 0.0; 0.1 0.0]         # noise reads the delayed state
+ρ = spectralRadiusOfMoment(mkprob(0.5,  B; β = βn), T, p)  # order 2S, unpruned
+ρ = spectralRadiusOfMoment(mkprob(τfun, B; β = βn), T, p)  # classical fallback + warning
+```
+
+### Non-smooth coefficients can cap the order — for every method
+
+The orders above assume smooth coefficients `A(t), B(t), α(t), σ(t)`. A `C⁰`
+coefficient (derivative kinks, e.g. the trapezoidal engagement of a helical
+milling cutter) caps the attainable order at ≈2; `C¹` at ≈3; genuine jumps
+(straight-fluted milling) at ≈1 — regardless of `S` or `q`. If the kink times
+are fixed, choose `n_steps` so they land on step boundaries (full order
+returns); under spindle-speed variation they drift, so expect the cap
+asymptotically — though at engineering tolerances the high-order engine usually
+still wins on error constants. A smoothed coefficient model (e.g. truncated
+Fourier) restores the full order.
 
 ## Choosing the CPU or GPU backend automatically
 
