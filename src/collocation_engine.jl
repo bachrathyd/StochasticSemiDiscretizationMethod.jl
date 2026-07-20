@@ -1022,8 +1022,10 @@ function _applyH_v9m_slow(eng,C)
     return Ck
 end
 
-# dispatch helpers: v9 eng (has :engine=:v9) vs v8 fallback (a plain NamedTuple)
-_applyH(eng,C) = haskey(eng,:engine) && eng.engine==:v9 ? applyH_v9m(eng,C) : applyH_v8m(eng,C)
+# dispatch helpers: v9/vT engines carry :engine; v8 fallback is a plain NamedTuple
+_applyH(eng,C) = !haskey(eng,:engine) ? applyH_v8m(eng,C) :
+                 eng.engine==:v9      ? applyH_v9m(eng,C) :
+                 eng.engine==:vT      ? applyH_vT(eng,C)  : applyH_v8m(eng,C)
 
 # ---------------------------------------------------------------------------
 # Allocation-free one-period map for the Krylov eigensolve.
@@ -1213,5 +1215,406 @@ function _fixPoint_v9m_ref(eng; tol=1e-11, krylovdim=30)
                                 krylovdim=min(krylovdim,Nv), maxiter=300)
     info.converged==0 && @warn "fixPoint_v9m: not fully converged" info
     vec2sym(sol)
+end
+
+# ------------------------------------------------------------------ cov_colloc_vT
+# =============================================================================
+# cov_colloc_vT.jl — TIME-VARYING delay τ(t): fractional-limit integrated-
+# history engine (generalizes the v9 J-DOF design to a smooth, T-periodic,
+# non-vanishing delay; single delay, single Wiener channel, β ≡ 0).
+#
+# Reading map. With ξ(t) = t − τ(t) strictly increasing (ξ′ = 1 − τ′ > 0),
+# the delayed-drift integral of reading step n, stage i is, after u = ξ(s),
+#     ∫_{t_n}^{t_n+c_i h} B(s)·x(s−τ(s)) ds = ∫_{ξ(t_n)}^{ξ(t_n+c_i h)} B̃(u)·x(u) du,
+#     B̃(u) = B(ξ⁻¹(u)) / ξ′(ξ⁻¹(u))            — a single GLOBAL weight function.
+# All reading limits {ξ(t_n + θ h) : θ ∈ {0, c_1..c_S, 1}} are known a priori,
+# so each window block [t_m, t_m+h] stores CUMULATIVE weighted-history DOFs
+#     G_k = ∫_{t_m}^{v_k} B̃(u)·x(u) du
+# at the sorted reading-image breakpoints v_k that fall inside it (v_last =
+# t_m+h always; the per-block breakpoint pattern is p-periodic). Every reading
+# integral is then an EXACT ±1 signed sum of stored G's:
+#     F(q_hi) − F(q_lo) = G^{(j_hi)}(q_hi) − G^{(j_lo)}(q_lo) + Σ_j G^{(j)}(end),
+# summing full-block ends over j_lo ≤ j < j_hi — no interpolation anywhere, so
+# rough (Wiener-driven) delayed reads carry no order cap, exactly as in v8/v9.
+# Constant τ = r·h reduces to the v9 construction verbatim (breakpoints =
+# stage nodes, single-selector reads into block r−1).
+#
+# Stage equations (reading step n):  Y_i = x_n + h Σ_j a_ij A_j Y_j + J̃_i,
+# x_e = x_n + h Σ_j b_j A_j Y_j + J̃_e, with J̃ the signed G-sums above.
+#
+# Noise increment ΔB: node/G blocks from the same causal kernel machinery as
+# v9 (η ≡ 0 at window nodes; delayed reads of η vanish — needs only τ(t) ≥ h,
+# not alignment), with Bf(θh) → B̃(t_n + θh) and the per-step breakpoint list
+# replacing {c, 1}. Padding: blocks whose breakpoint count is below the global
+# max NJ duplicate the full-block DOF (readers never reference pads).
+#
+# Block layout (BSIZE = (NJ+1)d): [x_e; G_1..G_NJ].
+# Requires: τ(t) ≥ h, ξ′ ≥ 0.1, τ T-periodic, single delay, β ≡ 0.
+# =============================================================================
+
+struct ProbT
+    d::Int; T::Float64
+    τf::Function                 # t ↦ τ(t)  (smooth, T-periodic, ≥ h)
+    τmin::Float64; τmax::Float64 # grid-sampled bounds over one period
+    A::Function; B::Function; α::Function; β::Function
+    σ::Function
+end
+ProbT(d,T,τf,τmin,τmax,A,B,α,β) = ProbT(d,T,τf,τmin,τmax,A,B,α,β, t->zeros(d,1))
+
+function _no_delay_noise(pb::ProbT; nt=64)
+    for k in 0:nt-1
+        maximum(abs, pb.β((k+0.5)/nt * pb.T)) > 1e-14 && return false
+    end
+    true
+end
+
+# central-difference τ′ (build-time only; δ at the FD sweet spot)
+_dtau(τf, t; δ=6.0e-6) = (τf(t+δ) - τf(t-δ)) / (2δ)
+
+# ξ⁻¹(u): solve w − τ(w) = u by bisection on [u+τmin, u+τmax] (ξ′ > 0 ⇒ the
+# bracket function is increasing; bounds padded 1% against sampling slack).
+function _xi_inv(pb::ProbT, u)
+    pad = 0.01*max(pb.τmax - pb.τmin, 1e-8*pb.τmax)
+    lo = u + pb.τmin - pad; hi = u + pb.τmax + pad
+    flo = lo - pb.τf(lo) - u
+    fhi = hi - pb.τf(hi) - u
+    (flo <= 0.0 && fhi >= 0.0) ||
+        error("ξ⁻¹ bracket failed at u=$u (τ bounds too tight — is τ(t) T-periodic?)")
+    for _ in 1:80
+        mid = 0.5*(lo+hi)
+        f = mid - pb.τf(mid) - u
+        if f < 0.0; lo = mid; else; hi = mid; end
+        hi - lo < 4*eps(abs(u) + pb.τmax + 1.0) && break
+    end
+    0.5*(lo+hi)
+end
+
+struct StepVT
+    Pblock::Matrix{Float64}        # BSIZE×W new-block rows [x_e; G_1..G_NJ]
+    Yrows::Matrix{Float64}         # Sd×W stage rows (computed, NOT persisted)
+    As::Vector{Matrix{Float64}}; αs::Vector{Matrix{Float64}}
+    σs::Vector{Matrix{Float64}}
+    Bt::Function                   # memoized θ ∈ [0,1] ↦ B̃(t_n + θh)  (d×d)
+    θbrk::Vector{Float64}          # NJ breakpoints (θ units; pads = 1.0)
+    nbrk::Int                      # genuine breakpoints (θbrk[nbrk] == 1.0)
+    a::Matrix{Float64}; b::Vector{Float64}; c::Vector{Float64}
+    lcoef::Vector{Vector{Float64}}
+    φstage::Vector{Matrix{Float64}}
+    h::Float64; d::Int; S::Int; W::Int; BSIZE::Int; r::Int; NJ::Int
+end
+
+# One reading piece: window slot `lag` (0-based), G index `idx` (0 = block
+# start ⇒ contributes nothing), sign ±1.
+const _VTPiece = Tuple{Int,Int,Float64}
+
+function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf,
+                 θbrk::Vector{Float64}, nbrk::Int,
+                 readmap::Vector{Vector{_VTPiece}})
+    d=pb.d; S=length(c); NJ=length(θbrk); BSIZE=(NJ+1)*d; W=(r_buf+1)*BSIZE
+    As=[Matrix(pb.A(t_n+c[i]*h)) for i in 1:S]
+    αs=[Matrix(pb.α(t_n+c[i]*h)) for i in 1:S]
+    σs=[Matrix(pb.σ(t_n+c[i]*h)) for i in 1:S]
+    # global weight B̃ on THIS block, memoized per θ (bisection runs once per node)
+    Btcache=Dict{Float64,Matrix{Float64}}()
+    Bt(θ) = get!(Btcache, θ) do
+        u = t_n + θ*h
+        w = _xi_inv(pb, u)
+        ξp = 1.0 - _dtau(pb.τf, w)
+        Matrix(pb.B(w)) ./ ξp
+    end
+    Id=Matrix{Float64}(I,d,d)
+    lcoef=_lagr_coefs(c)
+    xn_rng = 1:d
+    Gcol(lag, idx) = lag*BSIZE + idx*d          # 0-based col offset of G_idx in slot lag
+    # stage solve: (I − h a⊗A) Ystack = 1⊗x_n + J̃_del (signed G-sums)
+    M=Matrix{Float64}(I,S*d,S*d)
+    for i in 1:S, j in 1:S; M[(i-1)*d+1:i*d,(j-1)*d+1:j*d] .-= h*a[i,j].*As[j]; end
+    Minv=inv(M)
+    RHS=zeros(S*d, W)
+    for i in 1:S
+        RHS[(i-1)*d+1:i*d, xn_rng] .= Id
+        for (lag, idx, sgn) in readmap[i]
+            idx == 0 && continue
+            base = Gcol(lag, idx)
+            for q in 1:d; RHS[(i-1)*d+q, base+q] += sgn; end
+        end
+    end
+    Yrows=Minv*RHS
+    # endpoint row
+    erow=zeros(d, W); erow[:, xn_rng] .= Id
+    for (lag, idx, sgn) in readmap[S+1]
+        idx == 0 && continue
+        base = Gcol(lag, idx)
+        for q in 1:d; erow[q, base+q] += sgn; end
+    end
+    for j in 1:S; erow .+= h*b[j].*(As[j]*Yrows[(j-1)*d+1:j*d, :]); end
+    # continuous output K = (a⁻¹ ⊗ I)(Y − 1 x_n)/h
+    Ainv=inv(a)
+    Krows=zeros(S*d, W)
+    for j in 1:S, m in 1:S
+        Krows[(j-1)*d+1:j*d, :] .+= Ainv[j,m].*Yrows[(m-1)*d+1:m*d, :]
+        Krows[(j-1)*d+1:j*d, xn_rng] .-= Ainv[j,m].*Id
+    end
+    Krows ./= h
+    # new G rows: cumulative ∫ B̃(t_n+s)·x(t_n+s) ds at the breakpoints, by
+    # per-segment Gauss quadrature on the dense output x(θh)=x_n+hΣ_j ℓint_j(θ)K_j
+    Grows=zeros(NJ*d, W)
+    acc=zeros(d, W)
+    θprev=0.0
+    for k in 1:nbrk
+        θk=θbrk[k]
+        if θk > θprev + 1e-14
+            Wx=zeros(d,d); Wk=[zeros(d,d) for _ in 1:S]
+            for (gx,gw) in zip(_G8.x, _G8.w)
+                θ=θprev+(θk-θprev)*gx; wq=(θk-θprev)*h*gw
+                Bs=Bt(θ)
+                Wx .+= wq.*Bs
+                for j in 1:S; Wk[j] .+= (wq*h*_lint(lcoef[j], θ)).*Bs; end
+            end
+            acc[:, xn_rng] .+= Wx
+            for j in 1:S; acc .+= Wk[j]*Krows[(j-1)*d+1:j*d, :]; end
+        end
+        Grows[(k-1)*d+1:k*d, :] .= acc
+        θprev=θk
+    end
+    for k in nbrk+1:NJ                          # pads duplicate the full-block DOF
+        Grows[(k-1)*d+1:k*d, :] .= Grows[(nbrk-1)*d+1:nbrk*d, :]
+    end
+    Pblock=vcat(erow, Grows)
+    RHSΦ=zeros(S*d, d); for i in 1:S; RHSΦ[(i-1)*d+1:i*d, :] .= Id; end
+    Φstack=Minv*RHSΦ
+    φstage=[Φstack[(k-1)*d+1:k*d, :] for k in 1:S]
+    return StepVT(Pblock, Yrows, As, αs, σs, Bt, θbrk, nbrk, a, b, c, lcoef,
+                  φstage, h, d, S, W, BSIZE, r_buf, NJ)
+end
+
+# helpers mirroring the v9 versions but taking a StepVT
+_φ_atT(st::StepVT, θ) = begin
+    Φ=Matrix{Float64}(I, st.d, st.d)
+    for j in 1:st.S; Φ .+= (st.h*_lint(st.lcoef[j], θ)).*(st.As[j]*st.φstage[j]); end
+    Φ
+end
+_Σn_atT(st::StepVT, θ, Σs, Egg) = begin
+    out=zeros(st.d,st.d)
+    for j in 1:st.S
+        rhs = st.As[j]*Σs[j] .+ Σs[j]*st.As[j]' .+ st.αs[j]*Σs[j]*st.αs[j]' .+ Egg[j]
+        out .+= (st.h*_lint(st.lcoef[j], θ)).*rhs
+    end
+    out
+end
+_ΔkerT(st::StepVT, θa, θb, Σs, Egg, φc) =
+    θa<=θb ? _Σn_atT(st,θa,Σs,Egg)*(φc(θb)/φc(θa))' :
+             (φc(θa)/φc(θb))*_Σn_atT(st,θb,Σs,Egg)
+
+# ΔB for the vT block [x_e; G_1..G_NJ]: identical causal-kernel machinery to
+# noise_block_v9m with Bf(θh) → B̃(t_n+θh) and {c,1} → the breakpoint list.
+function noise_block_vT(st::StepVT, C)
+    d=st.d; S=st.S; h=st.h; a=st.a; b=st.b; BSIZE=st.BSIZE; NJ=st.NJ
+    Id=Matrix{Float64}(I,d,d)
+    Egg=Vector{Matrix{Float64}}(undef,S)
+    for k in 1:S
+        Yk=@view st.Yrows[(k-1)*d+1:k*d, :]
+        Mxx=Yk*C*Yk'
+        e = st.αs[k]*Mxx*st.αs[k]' .+ st.σs[k]*st.σs[k]'
+        Egg[k]=(e.+e')./2
+    end
+    d2=d*d
+    Mop=Matrix{Float64}(I,S*d2,S*d2)
+    for i in 1:S, j in 1:S
+        Lj=kron(Id,st.As[j]) .+ kron(st.As[j],Id) .+ kron(st.αs[j],st.αs[j])
+        Mop[(i-1)*d2+1:i*d2, (j-1)*d2+1:j*d2] .-= h*a[i,j].*Lj
+    end
+    rhs=zeros(S*d2)
+    for j in 1:S, k in 1:S; rhs[(j-1)*d2+1:j*d2] .+= h*a[j,k].*vec(Egg[k]); end
+    vΣ=Mop\rhs
+    Σs=[reshape(vΣ[(k-1)*d2+1:k*d2],d,d) for k in 1:S]
+    endm=zeros(d,d)
+    for j in 1:S
+        endm .+= h*b[j].*(st.As[j]*Σs[j] .+ Σs[j]*st.As[j]' .+ st.αs[j]*Σs[j]*st.αs[j]' .+ Egg[j])
+    end
+    cache=Dict{Float64,Matrix{Float64}}(); φc(θ)=get!(()->_φ_atT(st,θ),cache,θ)
+    rng_G(k) = (k*d+1 : (k+1)*d)
+    ΔB=zeros(BSIZE,BSIZE)
+    ΔB[1:d, 1:d] .= endm
+    # E[Gη_k η(x_e)ᵀ] — x_e is the endpoint node θ=1 ≥ θ_k ⇒ single segment
+    for k in 1:NJ
+        θa=st.θbrk[k]; acc=zeros(d,d)
+        if θa > 1e-14
+            for (gx,gw) in zip(_G8.x,_G8.w)
+                θ=θa*gx
+                acc .+= (θa*gw).*(st.Bt(θ)*_ΔkerT(st,θ,1.0,Σs,Egg,φc))
+            end
+        end
+        V=h.*acc
+        ΔB[rng_G(k), 1:d] .= V; ΔB[1:d, rng_G(k)] .= V'
+    end
+    # E[Gη_i Gη_jᵀ]
+    for i in 1:NJ, j in 1:NJ
+        j < i && continue
+        θa=st.θbrk[i]; θb=st.θbrk[j]; acc=zeros(d,d)
+        if θa > 1e-14 && θb > 1e-14
+            for (gx,gw) in zip(_G8.x,_G8.w)
+                ϑ=θb*gx; wϑ=θb*gw; Bv=st.Bt(ϑ)
+                segs = ϑ<θa ? ((0.0,ϑ),(ϑ,θa)) : ((0.0,θa),)
+                for (lo,hi) in segs
+                    hi<=lo && continue
+                    for (gx2,gw2) in zip(_G8.x,_G8.w)
+                        θ=lo+(hi-lo)*gx2
+                        acc .+= (wϑ*(hi-lo)*gw2).*(st.Bt(θ)*_ΔkerT(st,θ,ϑ,Σs,Egg,φc)*Bv')
+                    end
+                end
+            end
+        end
+        V=(h^2).*acc
+        ΔB[rng_G(i), rng_G(j)] .= V
+        i != j && (ΔB[rng_G(j), rng_G(i)] .= V')
+    end
+    return ΔB
+end
+
+function applyH_vT(eng,C)
+    Ck=copy(C)
+    for st in eng.steps
+        W=st.W; BSIZE=st.BSIZE; keep=W-BSIZE
+        P=st.Pblock; PC=P*Ck
+        newdiag=PC*P' + noise_block_vT(st,Ck)
+        Cnew=similar(Ck)
+        Cnew[1:BSIZE,1:BSIZE]=newdiag
+        Cnew[1:BSIZE,BSIZE+1:end]=PC[:,1:keep]
+        Cnew[BSIZE+1:end,1:BSIZE]=transpose(PC[:,1:keep])
+        Cnew[BSIZE+1:end,BSIZE+1:end]=Ck[1:keep,1:keep]
+        Ck=Cnew
+    end
+    return Ck
+end
+
+rho_U_vT(eng)=maximum(abs.(eigen(eng.U).values))
+
+function build_vT(pb::ProbT, S, p; force=false, want_U::Bool=false)
+    if !_no_delay_noise(pb)
+        force || error("the time-varying-delay collocation engine supports no delayed " *
+            "multiplicative noise (β ≡ 0); use method=ClassicalSD(q) for β ≢ 0, or " *
+            "force=true to IGNORE the delayed noise (diagnostics only)")
+        @warn "build_vT(force=true) on a problem with β ≢ 0: the delayed " *
+              "multiplicative noise is IGNORED — diagnostics only, ρ will be wrong" maxlog=1
+    end
+    a,b,c=gl_tab(S); h=pb.T/p
+    pb.τmin > 0.0 ||
+        error("the delay must be positive: sampled min τ(t) = $(pb.τmin) ≤ 0")
+    pb.τmin >= h*(1.0-1e-12) ||
+        error("time-varying delay requires τ(t) ≥ h = T/n_steps: sampled min τ = " *
+              "$(pb.τmin) < h = $h — use n_steps ≥ $(ceil(Int, pb.T/pb.τmin))")
+    # monotonicity of the reading map ξ(t)=t−τ(t), 16× oversampled. The bound is
+    # ONE-SIDED: only τ′ ≤ 0.9 is required (ξ′ ≥ 0.1); the delay may DECREASE
+    # arbitrarily fast (ξ′ > 1 merely stretches the reading image over more blocks).
+    for k in 0:16p-1
+        t=(k+0.5)/(16p)*pb.T
+        ξp=1.0-_dtau(pb.τf, t)
+        ξp >= 0.1 || error("reading map ξ(t)=t−τ(t) must be uniformly increasing: " *
+                           "ξ′($t) = $ξp < 0.1, i.e. τ′(t) > 0.9 — the delay grows " *
+                           "almost as fast as time advances; not supported")
+    end
+    maximum(abs(pb.τf(k/64*pb.T + pb.T) - pb.τf(k/64*pb.T)) for k in 0:63) <=
+        1e-9*max(pb.τmax,1.0) ||
+        @warn "τ(t) does not appear T-periodic (τ(t+T) ≠ τ(t)); the period map " *
+              "assumes exact T-periodicity" maxlog=1
+    ξ(t)=t-pb.τf(t)
+    r_buf=ceil(Int, pb.τmax/h - 1e-12) + 1
+    # ---- global reading-image points q[n][i] = ξ(t_n + θoffs[i]·h), θoffs=[0;c;1]
+    θoffs=vcat(0.0, c, 1.0)
+    # NOTE: absolute θ-tolerances (boundary snap 1e-9, breakpoint dedup/lookup
+    # 1e-8) put an ~1e-8·h floor on distinguishable reading images, and the u/h
+    # float split loses θ precision as eps·(τ/h) — for extreme τ/h (≳1e5) these
+    # scales meet. Self-consistent (merged images perturb a read limit by ≤1e-8·h,
+    # never O(1)), but superconvergence below that floor is not observable.
+    tolθ=1e-9
+    # locate u on the mesh: absolute block j (covers [(j−1)h, jh]) + snapped θpos
+    function locate(u)
+        x=u/h
+        j=floor(Int, x)+1
+        θ=x-(j-1)
+        if θ < tolθ
+            return (j, 0.0)                     # block start
+        elseif θ > 1.0-tolθ
+            return (j, 1.0)                     # block end
+        end
+        (j, θ)
+    end
+    locs=[[locate(ξ((n-1)*h + θo*h)) for θo in θoffs] for n in 1:p]
+    # ---- per-residue-class breakpoint lists (pattern is p-periodic)
+    cls(j)=mod(j-1,p)+1
+    interior=[Float64[] for _ in 1:p]
+    for n in 1:p, (j,θ) in locs[n]
+        (θ==0.0 || θ==1.0) && continue
+        push!(interior[cls(j)], θ)
+    end
+    brks=Vector{Vector{Float64}}(undef,p)
+    for m in 1:p
+        v=sort(interior[m]); u=Float64[]
+        for θ in v
+            (isempty(u) || θ-u[end] > 1e-8) && push!(u, θ)
+        end
+        push!(u, 1.0)
+        brks[m]=u
+    end
+    NJ=maximum(length.(brks))
+    θbrks=[vcat(brks[m], fill(1.0, NJ-length(brks[m]))) for m in 1:p]
+    nbrks=[length(brks[m]) for m in 1:p]
+    # ---- resolve a located point to its breakpoint index in its class
+    function bidx(j, θ)
+        θ==0.0 && return 0
+        m=cls(j)
+        θ==1.0 && return nbrks[m]
+        k=findfirst(x->abs(x-θ)<=1e-8, brks[m])
+        k===nothing && error("internal vT bookkeeping error: breakpoint lookup failed " *
+                             "(block $j, θ=$θ) — please report")
+        k
+    end
+    # ---- reading maps: readmap[n][i], i=1..S (stages) and S+1 (endpoint)
+    readmaps=Vector{Vector{Vector{_VTPiece}}}(undef,p)
+    for n in 1:p
+        (jlo,θlo)=locs[n][1]
+        klo=bidx(jlo,θlo)
+        rm=Vector{Vector{_VTPiece}}(undef,S+1)
+        for i in 1:S+1
+            (jhi,θhi)=locs[n][i+1]
+            khi=bidx(jhi,θhi)
+            pieces=_VTPiece[]
+            lag(j)=(n-1)-j                       # window slot of absolute block j
+            if jlo==jhi
+                khi != 0  && push!(pieces,(lag(jhi), khi,  1.0))
+                klo != 0  && push!(pieces,(lag(jlo), klo, -1.0))
+            else
+                klo != 0  && push!(pieces,(lag(jlo), klo, -1.0))
+                for j in jlo:jhi-1
+                    push!(pieces,(lag(j), nbrks[cls(j)], 1.0))
+                end
+                khi != 0  && push!(pieces,(lag(jhi), khi,  1.0))
+            end
+            for (lg,_,_) in pieces
+                0 <= lg <= r_buf || error("internal vT bookkeeping error: window slot " *
+                    "$lg out of range 0..$r_buf (n=$n, i=$i) — please report")
+            end
+            rm[i]=pieces
+        end
+        readmaps[n]=rm
+    end
+    # ---- per-step builds (class of the block STORED by step n is cls(n))
+    steps=[step_vT(pb, a, b, c, h, (n-1)*h, r_buf, θbrks[cls(n)], nbrks[cls(n)],
+                   readmaps[n]) for n in 1:p]
+    W=steps[1].W; BSIZE=steps[1].BSIZE
+    eng=(steps=steps, W=W, BSIZE=BSIZE, p=p, r=r_buf, d=pb.d, NJ=NJ, engine=:vT)
+    if want_U
+        U=Matrix{Float64}(I,W,W)
+        for st in steps
+            Td=zeros(W,W); Td[1:BSIZE,:]=st.Pblock
+            for k in 1:r_buf
+                Td[k*BSIZE+1:(k+1)*BSIZE,(k-1)*BSIZE+1:k*BSIZE]=Matrix(I,BSIZE,BSIZE)
+            end
+            U=Td*U
+        end
+        eng=merge(eng,(U=U,))
+    end
+    eng
 end
 

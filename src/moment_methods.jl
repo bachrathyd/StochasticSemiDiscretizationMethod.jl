@@ -18,9 +18,22 @@ abstract type MomentMethod end
     GaussLegendre(S=3)
 
 High-order ``S``-stage Gauss–Legendre collocation discretization of the delayed
-term: **order ``2S``** in the second moment (e.g. `S=3` → order 6). The default
-and recommended method; restricted to a single delay and a single Wiener channel.
-`GaussLegendre` is an alias.
+term. The attainable order depends on the delay of the problem (detected
+automatically; a warning names the engine used unless `verbosity=0`):
+
+  - constant delay aligned with the grid (``\\tau = r\\,T/p``): **order ``2S``**
+    (e.g. `S=3` → order 6);
+  - constant incommensurate delay: order in ``[S{+}1, 2S]``;
+  - smooth, T-periodic, function-valued delay ``\\tau(t) \\ge T/p``: **order floor
+    ``S{+}1``**, observed in ``[S{+}1, 2S]`` (requires ``\\beta \\equiv 0``,
+    ``\\xi(t) = t - \\tau(t)`` uniformly increasing). Rough (Wiener-driven)
+    delayed reads carry no extra penalty — the delayed drift stays exact in
+    pre-integrated history DOFs.
+
+The default and recommended method; restricted to a single delay and a single
+Wiener channel. Problems outside this scope (multiple delays/channels, or a
+varying delay with delayed multiplicative noise) automatically fall back to
+[`ClassicalSD`](@ref)`(2)` with a warning. `GaussLegendre` is an alias.
 """
 struct Collocation <: MomentMethod
     S::Int
@@ -65,22 +78,73 @@ function _classical_result(prob::LDDEProblem, period::Real, n_steps::Integer, q:
                      n_steps=n_steps, calculate_additive=additive)
 end
 
+# Collocation applicability: returns `nothing` when the collocation engines can
+# handle `prob` at this resolution, else a human-readable reason for the
+# classical fallback. The fractional-limit (vT) engine requires β ≡ 0, so any
+# non-aligned delay (function-valued OR grid-misaligned constant) combined with
+# delayed multiplicative noise must fall back.
+function _collocation_blocked(prob::LDDEProblem, period::Real, n_steps::Integer)
+    length(prob.Bs) == 1 || return "multiple delay terms ($(length(prob.Bs)))"
+    (length(prob.αs) ≤ 1 && length(prob.βs) ≤ 1 && length(prob.σs) ≤ 1) ||
+        return "multiple Wiener channels"
+    βnz = !isempty(prob.βs) && any(
+        maximum(abs, Matrix{Float64}(prob.βs[1]((k + 0.5) / 64 * float(period)))) > 1e-14
+        for k in 0:63)
+    if βnz
+        τraw = prob.Bs[1].τ.τ
+        if !(τraw isa Real)
+            return "a function-valued delay combined with delayed multiplicative noise (β ≢ 0)"
+        elseif _aligned_r(float(τraw), float(period), n_steps) == 0
+            return "a grid-misaligned constant delay combined with delayed multiplicative " *
+                   "noise (β ≢ 0; choose n_steps with τ·n_steps/T integer to use the " *
+                   "aligned collocation engine)"
+        end
+    end
+    nothing
+end
+
+# fallback: Collocation requested but not applicable → classical path. NOTE:
+# collocation-specific kwargs (tol, krylovdim, force) are NOT forwarded — the
+# classical solvers have different keyword surfaces, and the user tuned them
+# for the collocation path anyway.
+function _collocation_or_fallback(f_colloc, f_classical, prob, T, p, m::Collocation,
+                                  verbosity::Integer)
+    blocked = _collocation_blocked(prob, T, p)
+    blocked === nothing && return f_colloc()
+    verbosity ≥ 1 &&
+        @warn "Collocation($(m.S)) (order up to $(2m.S)) is not applicable to this " *
+              "problem: $blocked. Falling back to the classical multiplication-free " *
+              "factored semi-discretization (ClassicalSD(2), first order in the " *
+              "second moment); collocation-specific keyword arguments are ignored. " *
+              "(suppress with verbosity=0)" maxlog=1
+    f_classical()
+end
+
 """
-    spectralRadiusOfMoment(prob::LDDEProblem, period, n_steps; method=Collocation(3), kwargs...) -> Float64
+    spectralRadiusOfMoment(prob::LDDEProblem, period, n_steps; method=Collocation(3), verbosity=1, kwargs...) -> Float64
 
 Second-moment spectral radius ``\\rho(\\mathcal{H})`` of the one-period map for the
 stochastic delay problem `prob`, over the principal `period` resolved with
 `n_steps` steps. `method` selects the discretization — [`Collocation`](@ref)`(S)`
-(order ``2S``, the default) or [`ClassicalSD`](@ref)`(q)` (first order, reference).
-Mean-square stability corresponds to a value below `1`.
+(the default; order ``2S`` for an aligned constant delay, floor ``S{+}1`` for a
+smooth time-varying delay — see [`Collocation`](@ref)) or [`ClassicalSD`](@ref)`(q)`
+(first order, reference). The problem class is detected automatically and the
+best available engine is used; whenever the attainable order is below what the
+requested method advertises (or a fallback is taken), one warning explains the
+choice — set `verbosity=0` to silence. Mean-square stability corresponds to a
+value below `1`.
 """
 spectralRadiusOfMoment(prob::LDDEProblem, period::Real, n_steps::Integer;
                        method::MomentMethod=Collocation(3), kwargs...) =
     _spectral_moment(prob, period, n_steps, method; kwargs...)
 
-_spectral_moment(prob, T, p, m::Collocation; kwargs...) =
-    spectralRadiusOfMapping_collocation(prob, T, p; S=m.S, kwargs...)
-_spectral_moment(prob, T, p, m::ClassicalSD; kwargs...) =
+_spectral_moment(prob, T, p, m::Collocation; verbosity::Integer=1, kwargs...) =
+    _collocation_or_fallback(
+        () -> spectralRadiusOfMapping_collocation(prob, T, p; S=m.S,
+                                                  verbosity=verbosity, kwargs...),
+        () -> _spectral_moment(prob, T, p, ClassicalSD(2)),   # kwargs NOT forwarded
+        prob, T, p, m, verbosity)
+_spectral_moment(prob, T, p, m::ClassicalSD; verbosity::Integer=1, kwargs...) =
     spectralRadiusOfMapping_MF_factored(_classical_result(prob, T, p, m.q; additive=false); kwargs...)
 
 """
@@ -96,9 +160,13 @@ stationaryVariance(prob::LDDEProblem, period::Real, n_steps::Integer;
                    method::MomentMethod=Collocation(3), kwargs...) =
     _stationary_var(prob, period, n_steps, method; kwargs...)
 
-_stationary_var(prob, T, p, m::Collocation; kwargs...) =
-    fixPointOfMapping_collocation(prob, T, p; S=m.S, kwargs...)[1, 1]
-_stationary_var(prob, T, p, m::ClassicalSD; kwargs...) =
+_stationary_var(prob, T, p, m::Collocation; verbosity::Integer=1, kwargs...) =
+    _collocation_or_fallback(
+        () -> fixPointOfMapping_collocation(prob, T, p; S=m.S,
+                                            verbosity=verbosity, kwargs...)[1, 1],
+        () -> _stationary_var(prob, T, p, ClassicalSD(2)),    # kwargs NOT forwarded
+        prob, T, p, m, verbosity)
+_stationary_var(prob, T, p, m::ClassicalSD; verbosity::Integer=1, kwargs...) =
     fixPointOfMapping_MF_factored(_classical_result(prob, T, p, m.q; additive=true); kwargs...)[1]
 
 """
