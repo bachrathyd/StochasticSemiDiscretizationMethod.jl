@@ -133,7 +133,15 @@ Two structural points worth internalizing:
   model (sinusoidal `τ(t)`, delay spanning ≈5–8 steps), the measured orders
   against an independent classical reference are **3.5 at `S=2`** and **5.9 at
   `S=3`** — at or near the superconvergent `2S`, well above the guaranteed
-  `S+1` floor.
+  `S+1` floor (reproduce with
+  [`benchmark/ssv_timevarying_orders.jl`](benchmark/ssv_timevarying_orders.jl)):
+
+![](./assets/TimeVaryingDelayConvergence.png)
+
+  `S=3` at `p ≈ 160` already matches what the classical scheme needs
+  `p ≈ 4000` for. (On this additive-noise-only problem the classical scheme
+  rides its *deterministic* order ≈2 — its generic first-order stochastic cap
+  does not bind here, so the comparison above is a conservative one.)
 
 The mini-demos below share this prelude (a 1-DOF oscillator, `d = 2`,
 `x = [position; velocity]`, additive noise on the velocity):

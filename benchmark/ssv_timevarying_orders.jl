@@ -79,10 +79,20 @@ function render()
     plt = plot(layout=(1, 2), size=(1200, 460), dpi=300, framestyle=:box,
                legend=:bottomleft, guidefontsize=12, tickfontsize=10,
                left_margin=6Plots.mm, bottom_margin=6Plots.mm)
-    series = [("classical", "classical SD (q=2), order 1", :black, :circle),
-              ("S1", "GL collocation S=1", :seagreen, :utriangle),
-              ("S2", "GL collocation S=2", :royalblue, :diamond),
-              ("S3", "GL collocation S=3", :firebrick, :square)]
+    # measured LSQ slope of log(err) vs log(p) on the ρ panel, shown in the legend
+    function slope_of(case, ref)
+        pts = sort([(p, v[1]) for ((c, p), v) in have if c == case])
+        length(pts) < 2 && return NaN
+        xs = log.([p for (p, _) in pts]); ys = log.(abs.([v for (_, v) in pts] .- ref))
+        n = length(xs)
+        -(n * sum(xs .* ys) - sum(xs) * sum(ys)) / (n * sum(xs .^ 2) - sum(xs)^2)
+    end
+    lbl(case, base) = (s = slope_of(case, ρref); isnan(s) ? base :
+                       "$base  (slope $(round(s, digits=1)))")
+    series = [("classical", lbl("classical", "classical SD, q=2"), :black, :circle),
+              ("S1", "GL collocation S=1 (pre-asymptotic)", :seagreen, :utriangle),
+              ("S2", lbl("S2", "GL collocation S=2"), :royalblue, :diamond),
+              ("S3", lbl("S3", "GL collocation S=3"), :firebrick, :square)]
     for (panel, ref, lab) in ((1, ρref, "error in ρ(H)"), (2, vref, "error in Var(x)"))
         for (case, name, col, mk) in series
             pts = sort([(p, v) for ((c, p), v) in have if c == case])
@@ -96,12 +106,9 @@ function render()
         plot!(plt[panel]; xlabel="steps per period  p", ylabel=lab,
               title=(panel == 1 ? "SSV turning — time-varying delay τ(t)" : ""))
     end
-    # slope guides on the ρ panel
-    for (ord, x0, y0) in ((1, 600.0, 2e-3), (4, 90.0, 3e-5), (6, 90.0, 3e-7))
-        xs = [x0, 2x0]
-        plot!(plt[1], xs, y0 .* (x0 ./ xs) .^ ord; color=:gray, ls=:dash,
-              label="", annotations=(2.2x0, y0 * 2.0^-ord, Plots.text("$ord", 9, :gray)))
-    end
+    # NOTE: on this additive-only problem (α ≡ 0) the classical ρ error follows
+    # its deterministic order ≈ 2, not the generic first-order stochastic cap —
+    # the slope printed in the legend is the honest measured value.
     png(plt, ASSET)
     if isdir(PAPER_IMG)
         try
