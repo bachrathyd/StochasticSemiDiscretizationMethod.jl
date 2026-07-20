@@ -166,8 +166,15 @@ _stationary_var(prob, T, p, m::Collocation; verbosity::Integer=1, kwargs...) =
                                             verbosity=verbosity, kwargs...)[1, 1],
         () -> _stationary_var(prob, T, p, ClassicalSD(2)),    # kwargs NOT forwarded
         prob, T, p, m, verbosity)
-_stationary_var(prob, T, p, m::ClassicalSD; verbosity::Integer=1, kwargs...) =
-    fixPointOfMapping_MF_factored(_classical_result(prob, T, p, m.q; additive=true); kwargs...)[1]
+function _stationary_var(prob, T, p, m::ClassicalSD; verbosity::Integer=1,
+                         tol=nothing, krylovdim=nothing, force=nothing, kwargs...)
+    # courtesy: `tol` (the collocation/KrylovKit convention) translates to the
+    # gmres `reltol` of the factored fixpoint; `krylovdim`/`force` have no
+    # classical-variance counterpart and are ignored rather than crashing gmres
+    rst = _classical_result(prob, T, p, m.q; additive=true)
+    tol === nothing ? fixPointOfMapping_MF_factored(rst; kwargs...)[1] :
+                      fixPointOfMapping_MF_factored(rst; reltol=tol, kwargs...)[1]
+end
 
 """
     timePeriodicVariance(prob::LDDEProblem, period, n_steps; component=1, q=2, kwargs...) -> (t, var)

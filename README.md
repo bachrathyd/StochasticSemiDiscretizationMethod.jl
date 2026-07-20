@@ -134,13 +134,15 @@ Two structural points worth internalizing:
   **3.5 at `S=2`** and **5.9 at `S=3`** — at or near the superconvergent `2S`,
   well above the guaranteed `S+1` floor. (Reference: Richardson extrapolation of
   the finest ladder, cross-validated against the independently extrapolated
-  classical path to `8×10⁻⁸` relative; reproduce with
+  classical path to `8×10⁻⁸` relative in ρ and `1.4×10⁻⁷` in the variance;
+  reproduce with
   [`benchmark/ssv_timevarying_orders.jl`](benchmark/ssv_timevarying_orders.jl)):
 
 ![](./assets/TimeVaryingDelayConvergence.png)
 
-  `S=3` at `p ≈ 160` already matches what the classical scheme needs
-  `p ≈ 4000` for. (On this additive-noise-only problem the classical scheme
+  `S=3` reaches at `p ≈ 240` the variance accuracy the classical scheme attains
+  only near `p ≈ 4000` (in ρ, near `p ≈ 2000`) — an ≈8–15× resolution advantage
+  at equal accuracy. (On this additive-noise-only problem the classical scheme
   rides its *deterministic* order ≈2 — its generic first-order stochastic cap
   does not bind here, so the comparison above is a conservative one.)
 
