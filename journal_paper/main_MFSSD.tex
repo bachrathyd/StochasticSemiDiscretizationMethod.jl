@@ -11,6 +11,12 @@
 \usepackage{bm}
 \usepackage{natbib}
 
+% Layout robustness: absorb long inline-math lines and break long URLs
+\setlength{\emergencystretch}{3em}
+\makeatletter
+\g@addto@macro\UrlBreaks{\do\a\do\b\do\c\do\d\do\e\do\f\do\g\do\h\do\i\do\j\do\k\do\l\do\m\do\n\do\o\do\p\do\q\do\r\do\s\do\t\do\u\do\v\do\w\do\x\do\y\do\z\do\A\do\B\do\C\do\D\do\E\do\F\do\G\do\H\do\I\do\J\do\K\do\L\do\M\do\N\do\O\do\P\do\Q\do\R\do\S\do\T\do\U\do\V\do\W\do\X\do\Y\do\Z}
+\makeatother
+
 \journal{Journal of Sound and Vibration}
 
 \begin{document}
@@ -98,7 +104,10 @@ The paper is structured as follows. Section \ref{sec:theory} establishes the exp
 In this section, we lay the mathematical foundation for the stochastic stability analysis and describe the classical SSDM implementation. We consider a linear system of SDDEs representing a multi-DOF mechanical system subjected to non-autonomous drift, delay, and both additive and multiplicative noise:
 \begin{equation}
 \label{eq:sdde_theory}
-\mathrm{d}\mathbf{x}(t) = \left[\mathbf{A}(t)\mathbf{x}(t) + \mathbf{B}(t)\mathbf{x}(t-\tau) + \mathbf{c}(t)\right] \mathrm{d}t + \sum_{k=1}^m \left[\boldsymbol{\alpha}_k(t)\mathbf{x}(t) + \boldsymbol{\beta}_k(t)\mathbf{x}(t-\tau) + \boldsymbol{\gamma}_k(t)\right] \mathrm{d}W_k(t),
+\begin{split}
+\mathrm{d}\mathbf{x}(t) = {}& \left[\mathbf{A}(t)\mathbf{x}(t) + \mathbf{B}(t)\mathbf{x}(t-\tau) + \mathbf{c}(t)\right] \mathrm{d}t \\
+&+ \sum_{k=1}^m \left[\boldsymbol{\alpha}_k(t)\mathbf{x}(t) + \boldsymbol{\beta}_k(t)\mathbf{x}(t-\tau) + \boldsymbol{\gamma}_k(t)\right] \mathrm{d}W_k(t),
+\end{split}
 \end{equation}
 interpreted in the It\^o sense; all coefficient matrices are bounded, piecewise-continuous, and $T$-periodic, which guarantees a unique strong solution with finite second moments for square-integrable initial data \cite{Mao2007}. When a physical broadband excitation of non-zero correlation time is modeled, the Wong--Zakai limit yields the Stratonovich interpretation, and the corresponding drift correction $\tfrac12\sum_k \boldsymbol\alpha_k(\boldsymbol\alpha_k \mathbf{x} + \boldsymbol\beta_k \mathbf{x}_\tau + \boldsymbol\gamma_k)$ must be absorbed into $\mathbf{A}, \mathbf{B}, \mathbf{c}$ before applying the present (It\^o-based) framework.
 
@@ -120,9 +129,11 @@ The transition matrices $\mathbf{F}_n$ and $\mathbf{G}_{n,k}$ share the followin
 The deterministic leading blocks $\mathbf{F}_{n,0}, \mathbf{F}_{n,r}$ follow from exact integration over the step in the standard way; the explicit zeroth-order expressions are collected in \ref{app:blocks} to keep the exposition compact. The stochastic contribution over the step is the It\^o integral $\int_0^{\Delta t}\boldsymbol\Phi_n(s)\,[\boldsymbol\alpha_k \mathbf{x} + \boldsymbol\beta_k \mathbf{x}_\tau + \boldsymbol\gamma_k](t_n{+}s)\,\mathrm{d}W_k(s)$, with $\boldsymbol\Phi_n(s) = \exp(\mathbf{A}_{\mathrm{avg}}(\Delta t - s))$ the within-step propagator. Rather than representing it by a single matrix times $\Delta W_{n,k}$ --- which is only first-order consistent --- we work with the \emph{sampled} stochastic coefficient functions
 \begin{equation}
 \label{eq:Gsampled}
+\begin{gathered}
 \mathbf{G}^k_{n,0}(s) = \boldsymbol\Phi_n(s)\, \boldsymbol{\alpha}_k(t_n+s), \qquad
-\mathbf{G}^k_{n,r}(s) = \boldsymbol\Phi_n(s)\, \boldsymbol{\beta}_k(t_n+s), \qquad
+\mathbf{G}^k_{n,r}(s) = \boldsymbol\Phi_n(s)\, \boldsymbol{\beta}_k(t_n+s), \\
 \hat{\boldsymbol\gamma}_{n,k}(s) = \boldsymbol\Phi_n(s)\, \boldsymbol{\gamma}_k(t_n+s),
+\end{gathered}
 \end{equation}
 whose second moments enter through the It\^o isometry as integrals over the step (Eq.~\eqref{eq:mom_update} below); the deterministic forcing enters through $\hat{\mathbf{c}}_n = \int_0^{\Delta t} \boldsymbol\Phi_n(s)\, \mathbf{c}(t_n+s)\, \mathrm{d}s$. In the block-sparse augmented notation of Eq.~\eqref{eq:discrete_map}, $\mathbf{G}_{n,k}(s)$ carries the two blocks of Eq.~\eqref{eq:Gsampled} in its first row, and $\Delta W_{n,k}$ is understood in the isometry sense made precise next.
 
@@ -214,9 +225,10 @@ The algorithm is implemented using a virtual circular buffer with logical indice
 The multiplication-free reformulation of Section \ref{sec:mf_algo} removes the $\mathcal{O}(p^4)$ bottleneck in the delay resolution. For systems with many degrees of freedom, however, a second, independent bottleneck emerges from the \emph{state} dimension $d$: the It\^o contraction in Eq.~\eqref{eq:ito_injection} is classically assembled by pre-contracting, for every step $n$ and every pair of stochastic coefficient blocks, the fourth-order tensor
 \begin{equation}
 \label{eq:emat}
-\mathbf{E}^{(k,l)}_n \;=\; \sum_{w=1}^{m}\int_0^{\Delta t} \mathbf{G}^w_{n,l}(s) \otimes \mathbf{G}^w_{n,k}(s)\, \mathrm{d}s \;\in\; \mathbb{R}^{d^2 \times d^2},
-\qquad
+\begin{gathered}
+\mathbf{E}^{(k,l)}_n \;=\; \sum_{w=1}^{m}\int_0^{\Delta t} \mathbf{G}^w_{n,l}(s) \otimes \mathbf{G}^w_{n,k}(s)\, \mathrm{d}s \;\in\; \mathbb{R}^{d^2 \times d^2}, \\
 \operatorname{vec}\!\Big(\textstyle\sum_w \int_0^{\Delta t} \mathbf{G}^w_{n,k}(s)\, \mathbf{C}\, \mathbf{G}^w_{n,l}(s)^\top \mathrm{d}s\Big) = \mathbf{E}^{(k,l)}_n \operatorname{vec}(\mathbf{C}),
+\end{gathered}
 \end{equation}
 which is then applied as a dense matrix--vector product on the vectorized covariance block. The $\mathcal{O}(d^4)$ storage and $\mathcal{O}(d^4)$ per-application work of Eq.~\eqref{eq:emat} restricts this classical form to small state dimensions in practice ($d \lesssim 10$ for the fully assembled tensor; with aggressive sparsity exploitation at most a few tens), independently of any delay-resolution optimization.
 
@@ -224,10 +236,11 @@ which is then applied as a dense matrix--vector product on the vectorized covari
 The key observation is that $\mathbf{E}^{(k,l)}_n$ is never an arbitrary $d^2\times d^2$ matrix: it inherits the structure of the It\^o isometry. In practice the isometry integral is evaluated by a $K$-point quadrature rule with nodes $s_\kappa \in [0,\Delta t]$ and weights $w_\kappa$ (trapezoidal with $K=20$ in the present implementation, so $\sum_\kappa w_\kappa = \Delta t$),
 \begin{equation}
 \label{eq:kron_quad}
+\begin{gathered}
 \int_0^{\Delta t} \mathbf{G}^w_{n,k}(s)\, \mathbf{C}\, \mathbf{G}^w_{n,l}(s)^\top \mathrm{d}s
-\;\approx\; \sum_{\kappa=1}^{K} \tilde{\mathbf{G}}^{(\kappa),w}_{n,k}\, \mathbf{C}\, \big(\tilde{\mathbf{G}}^{(\kappa),w}_{n,l}\big)^{\!\top},
-\qquad
+\;\approx\; \sum_{\kappa=1}^{K} \tilde{\mathbf{G}}^{(\kappa),w}_{n,k}\, \mathbf{C}\, \big(\tilde{\mathbf{G}}^{(\kappa),w}_{n,l}\big)^{\!\top}, \\
 \tilde{\mathbf{G}}^{(\kappa),w}_{n,k} = \sqrt{w_\kappa}\; \mathbf{G}^w_{n,k}(s_\kappa),
+\end{gathered}
 \end{equation}
 i.e.\ the quadrature-discretized operator is a sum of $mK$ Kronecker-product terms, $\mathbf{E}^{(k,l)}_n \approx \sum_{w,\kappa} \tilde{\mathbf{G}}^{(\kappa),w}_{n,l} \otimes \tilde{\mathbf{G}}^{(\kappa),w}_{n,k}$. Folding the quadrature weights into the sampled coefficient matrices (the $\sqrt{\cdot}$-scaling above), the stochastic contribution to the boundary injection is evaluated \emph{directly in factored form},
 \begin{equation}
@@ -321,9 +334,10 @@ We demonstrate the efficiency and accuracy of MF-SSDM through the following case
 
 \subsection{Stochastic Delayed Mathieu Benchmark from the Literature}
 We first reproduce the second-moment stability chart of the stochastic delayed Mathieu equation from \cite{Sykora2020a} (Fig.~4 therein) to confirm the fidelity of the MF-SSDM boundary extraction. The parametric oscillator is
-\begin{equation}
-\ddot{x} + 2\zeta\dot{x} + \big(A + \epsilon \cos(t/2)\big)x = B\, x(t-\tau) + \alpha\big[\!-\!(A+\epsilon\cos(t/2))\,x - 2\zeta \dot x + B\,x(t-\tau)\big] \dot{W}(t),
-\end{equation}
+\begin{multline}
+\ddot{x} + 2\zeta\dot{x} + \big(A + \epsilon \cos(t/2)\big)x = B\, x(t-\tau) \\
++ \alpha\big[\!-\!(A+\epsilon\cos(t/2))\,x - 2\zeta \dot x + B\,x(t-\tau)\big] \dot{W}(t),
+\end{multline}
 i.e.\ the multiplicative noise perturbs the full restoring force with relative intensity $\alpha$, with $\epsilon = 2$, $\zeta = 0.1$, $\tau = 2\pi$, principal period $4\pi$, and $p = 40$ steps per period ($q=2$). Figure \ref{fig:mathieu} shows the second-moment stability boundaries in the $(A, B)$ plane for $\alpha \in \{0, 0.1, 0.2, 0.3\}$, obtained by the multi-dimensional bisection method \cite{Bachrathy2021}. The stable region shrinks monotonically with the noise intensity, and at $\alpha = 0.3$ it contracts to a closed island.
 
 \begin{figure}[ht!]
@@ -400,13 +414,15 @@ The final case study exercises every structural feature of the framework at once
 where $w$ is the dimensionless depth of cut (proportional to $a_p K_t$ over the modal stiffness) and $\mathbf{H}(t)$ is the directional cutting-force matrix obtained from the tangential/normal force decomposition (dynamic chip thickness $\Delta x \sin\varphi + \Delta y \cos\varphi$; $F_r = K_r F_t$, $K_r = 0.3$) of a $z=2$-tooth cutter:
 \begin{equation}
 \label{eq:hfun}
+\begin{gathered}
+\resizebox{0.9\textwidth}{!}{$\displaystyle
 \mathbf{H}(t) = \sum_{j=0}^{z-1} g\big(\varphi_j(t)\big)
 \begin{bmatrix}
 (\cos\varphi_j + K_r \sin\varphi_j)\sin\varphi_j & (\cos\varphi_j + K_r \sin\varphi_j)\cos\varphi_j \\[2pt]
 -(\sin\varphi_j - K_r \cos\varphi_j)\sin\varphi_j & -(\sin\varphi_j - K_r \cos\varphi_j)\cos\varphi_j
-\end{bmatrix},
-\qquad
+\end{bmatrix}$}, \\
 \varphi_j(t) = \int_0^t \Omega(s)\,\mathrm{d}s + \tfrac{2\pi j}{z},
+\end{gathered}
 \end{equation}
 with the screen function $g = 1$ while the tooth is in cut and $0$ otherwise. Up-milling is considered with the cut spanning exactly one quarter of the tooth-passing period: $\varphi_{\mathrm{en}} = 0$, $\varphi_{\mathrm{ex}} = \pi/4$ per tooth (the radial immersion $a_D = (1-\cos\varphi_{\mathrm{ex}})/2 \approx 0.146$ follows). The $(1,1)$ entry of $\mathbf{H}$ is the familiar single-DOF directional factor; the off-diagonal entries carry the $x$--$y$ cross-coupling that shapes milling stability in practice. Note that the tooth position $\varphi_j$ advances with the \emph{integral} of the modulated speed, and that the entry/exit discontinuities of $g$ drift relative to the time grid under SSV, so no mesh alignment is possible (or claimed) at these switching instants. The spindle speed is modulated sinusoidally, $\Omega(t) = \Omega_0\big(1 + \mathrm{RVA}\sin(2\pi t/T_{\mathrm{SSV}})\big)$ with $\mathrm{RVA} = 0.25$; the modulation period is $T_{\mathrm{SSV}} = N_{\mathrm{rev}} \cdot 2\pi/\Omega_0$ with $N_{\mathrm{rev}} = 10$ nominal revolutions --- a practically realistic, slow modulation --- and $T_{\mathrm{SSV}}$ is the principal period of the Floquet analysis. For the regenerative delay we use the instantaneous approximation $\tau(t) = (2\pi/z)/\Omega(t)$, which deviates from the exact implicit delay ($\int_{t-\tau}^{t}\Omega\,\mathrm{d}s = 2\pi/z$) at $\mathcal{O}(\mathrm{RVA})$ within one tooth pass --- a standard modeling choice at moderate modulation amplitudes \cite{Long2007, Seguy2010}; the implementation accepts a function-valued delay, discretizes the delayed read at the step-wise rounded delay $r(t_n) = \operatorname{round}(\tau(t_n)/\Delta t)$ within a buffer sized by $\tau_{\max} = (2\pi/z)/(\Omega_0(1-\mathrm{RVA}))$, and retains the nominal order of the underlying scheme at fixed $\mathrm{RVA}$. The multiplicative noise perturbs the cutting-force coefficient itself ($\sigma_c = 0.2$, at the upper end of the relative force scatter identified in turning experiments \cite{Fodor2020, Fodor2024_PSD}), hence it reads both the present and the delayed tool positions in both directions ($\boldsymbol\beta \ne 0$: the automatic pruning of Section \ref{sec:pruning} correctly stays inactive), and a weak additive source ($\sigma_a = 0.1$, acting in the feed direction) represents broadband force noise; the noise is interpreted in the It\^o sense, and a Stratonovich reading of the physical noise would shift the drift by the correction of Section \ref{sec:theory}, displacing the computed boundaries accordingly. The damping ratio is $\zeta = 0.02$ and the classical scheme with $q = 2$ is used.
 
@@ -516,13 +532,18 @@ The within-step continuous output $\mathbf{x}(t_n + \theta h) = \mathbf{x}_n + h
 
 \paragraph{Within-step noise covariance.} Let $\boldsymbol\eta(u)$ denote the noise-driven state perturbation accumulated inside the current step ($\boldsymbol\eta \equiv \mathbf{0}$ at all window nodes; delayed reads of $\boldsymbol\eta$ vanish because $\tau \ge h$). Its equal-time covariance $\boldsymbol\Sigma_\eta(u) = \mathbb{E}[\boldsymbol\eta(u)\boldsymbol\eta(u)^\top]$ obeys the within-step Lyapunov equation
 \begin{equation}
-\boldsymbol\Sigma_\eta' = \mathbf{A}\boldsymbol\Sigma_\eta + \boldsymbol\Sigma_\eta \mathbf{A}^\top + \sum_k \Big[\boldsymbol\alpha_k \mathbf{P}_{xx} \boldsymbol\alpha_k^\top + \boldsymbol\alpha_k \mathbf{P}_{x\tau} \boldsymbol\beta_k^\top + \boldsymbol\beta_k \mathbf{P}_{x\tau}^\top \boldsymbol\alpha_k^\top + \boldsymbol\beta_k \mathbf{P}_{\tau\tau} \boldsymbol\beta_k^\top + \hat{\boldsymbol\gamma}_k\hat{\boldsymbol\gamma}_k^\top\Big](u),
+\begin{split}
+\boldsymbol\Sigma_\eta' = {}& \mathbf{A}\boldsymbol\Sigma_\eta + \boldsymbol\Sigma_\eta \mathbf{A}^\top \\
+&+ \sum_k \Big[\boldsymbol\alpha_k \mathbf{P}_{xx} \boldsymbol\alpha_k^\top + \boldsymbol\alpha_k \mathbf{P}_{x\tau} \boldsymbol\beta_k^\top + \boldsymbol\beta_k \mathbf{P}_{x\tau}^\top \boldsymbol\alpha_k^\top + \boldsymbol\beta_k \mathbf{P}_{\tau\tau} \boldsymbol\beta_k^\top + \hat{\boldsymbol\gamma}_k\hat{\boldsymbol\gamma}_k^\top\Big](u),
+\end{split}
 \end{equation}
 where $\mathbf{P}_{xx}, \mathbf{P}_{x\tau}, \mathbf{P}_{\tau\tau}$ denote the present/delayed covariance blocks of the current window read at the stage nodes, and $\hat{\boldsymbol\gamma}_k$ the additive loading; the equation is solved by the same collocation rule. (The $\mathcal{O}(\Delta t)$ feedback of $\boldsymbol\Sigma_\eta$ itself onto the multiplicative injection is neglected, consistent with the collocation order.) For the \emph{two-time} entries the drift-propagation identity of linear It\^o systems applies: for $u \le v$,
 \begin{equation}
 \label{eq:causal_kernel}
-\mathbb{E}\big[\boldsymbol\eta(u)\,\boldsymbol\eta(v)^\top\big] \;=\; \boldsymbol\Sigma_\eta(u)\, \boldsymbol\Psi(v,u)^\top,
-\qquad \boldsymbol\Psi(v,u) = \text{present-drift propagator from } u \text{ to } v,
+\begin{gathered}
+\mathbb{E}\big[\boldsymbol\eta(u)\,\boldsymbol\eta(v)^\top\big] \;=\; \boldsymbol\Sigma_\eta(u)\, \boldsymbol\Psi(v,u)^\top, \\
+\boldsymbol\Psi(v,u) = \text{present-drift propagator from } u \text{ to } v,
+\end{gathered}
 \end{equation}
 because the martingale increments on $(u,v]$ are uncorrelated with $\boldsymbol\eta(u)$ and the delayed argument of $\boldsymbol\eta$ vanishes within the step. Equation \eqref{eq:causal_kernel} is exact for the locally frozen (within-step collocation) dynamics; its use constitutes an approximation only at the collocation order of the step itself. All node--node, node--integral ($\int \mathbf{B}\,\boldsymbol\eta$), and integral--integral covariance entries of the new block are Gauss quadratures of \eqref{eq:causal_kernel} over the corresponding (triangle-split) domains. The per-step noise injection assembled this way is what Section \ref{sec:colloc} refers to as the kernel fill; the measured order $2S$ of the composed scheme is empirical, consistent with the collocation order of every ingredient above, and no formal proof is claimed. The reference implementation of this appendix is contained in the accompanying package (see the Data Availability statement).
 
