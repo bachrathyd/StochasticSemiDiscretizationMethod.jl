@@ -77,6 +77,23 @@ var = stationaryVariance(prob, period, n_steps;    method = GaussLegendre(3))
 | Gauss–Legendre collocation | [`Collocation`](@ref)`(S)` / `GaussLegendre(S)` | **2S** (6 at `S=3`) | tight tolerances, low/moderate `d` (**default**) |
 | Classical semi-discretization | [`ClassicalSD`](@ref)`(q)` | 1 (any `q`) | reference/cross-check; high `d` via the factored operator |
 
+With `Collocation(S)` the attainable order further depends on the **delay** of
+the problem — detected automatically, with one explanatory warning whenever
+less than `2S` is attainable (silence with `verbosity = 0`):
+
+| Delay | Engine used | Expected order |
+|---|---|:---:|
+| constant, grid-aligned (`τ = r·Δt`) | aligned integrated-history | **2S** |
+| constant, misaligned | fractional-limit integrated-history | [S+1, 2S] |
+| time-periodic smooth `τ(t) ≥ Δt` | fractional-limit integrated-history | floor S+1, measured ≈ 2S |
+| varying `τ(t)` with `β ≢ 0`, or multiple delays/channels | classical MF-factored fallback | 1 |
+
+Rough (Wiener-driven) delayed reads — e.g. delayed *velocity* feedback — do
+**not** reduce the order of any collocation engine: the delayed drift is kept
+exact in pre-integrated history DOFs. Non-smooth **coefficients** do cap the
+order for every method (`C⁰` → ≈2, `C¹` → ≈3, jumps → ≈1); see the
+[Examples](examples.md) page.
+
 ### Lower-level building blocks
 
 | Situation | Function |

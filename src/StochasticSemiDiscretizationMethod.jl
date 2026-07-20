@@ -25,6 +25,15 @@ selecting between [`Collocation`](@ref)`(S)` (alias `GaussLegendre`, order ``2S`
 and [`ClassicalSD`](@ref)`(q)` (first order, kept for cross-checks). The
 lower-level building blocks below are also available directly.
 
+**Time-varying delays.** A smooth, T-periodic, function-valued delay
+``\\tau(t) \\ge T/p`` is handled automatically by a fractional-limit
+integrated-history collocation engine (guaranteed order floor ``S{+}1``,
+measured close to ``2S`` in practice — e.g. spindle-speed-variation turning:
+slopes 3.5 at `S=2`, 5.9 at `S=3`); rough (Wiener-driven) delayed reads carry no
+order penalty. Problems outside the collocation scope (multiple delays or
+channels, delayed multiplicative noise with a varying delay) fall back to the
+classical factored path with a warning — see [`Collocation`](@ref).
+
 The general workflow is: describe the system as an [`LDDEProblem`](@ref), turn it
 into a one-period moment map, and read off its spectral radius (stability) or
 fixed point (stationary mean/variance).

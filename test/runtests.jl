@@ -160,6 +160,94 @@ function tests()
         end
     end
 
+    @testset "time-varying delay collocation (vT engine)" begin
+        SSM = StochasticSemiDiscretizationMethod
+        # Mathieu-type smooth test problem; `mkB` selects the delayed-read
+        # structure: :pos reads the (smooth) position, :vel the (Wiener-rough)
+        # velocity — the preintegrated history must handle both at full order.
+        Afun(t) = @SMatrix [0.0 1.0; -(1.0+0.5cos(2π*t)) -0.4]
+        Bpos(t) = @SMatrix [0.0 0.0; 0.20*(1+0.3cos(2π*t)) 0.0]
+        Bvel(t) = @SMatrix [0.0 0.0; 0.0 0.18*(1+0.3cos(2π*t))]
+        αfun(t) = @SMatrix [0.0 0.0; 0.25 0.0]
+        z2 = @SMatrix zeros(2,2)
+        mkprob(τ; B=Bpos) = LDDEProblem(ProportionalMX(Afun), [DelayMX(τ, B)],
+            [stCoeffMX(1, ProportionalMX(αfun))], [stCoeffMX(1, DelayMX(τ, t -> z2))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        T = 1.0
+
+        # (a) ALIGNED REDUCTION: a constant delay passed as a *function* routes
+        # through the vT engine and must reproduce the aligned v9 engine.
+        for S in (1, 2, 3)
+            ρ9 = spectralRadiusOfMapping_collocation(mkprob(0.5), T, 16; S=S)
+            ρT = spectralRadiusOfMapping_collocation(mkprob(t -> 0.5), T, 16; S=S,
+                                                     verbosity=0)
+            @test isapprox(ρ9, ρT; rtol=1e-10)
+        end
+        v9 = fixPointOfMapping_collocation(mkprob(0.5), T, 16; S=3)[1, 1]
+        vT = fixPointOfMapping_collocation(mkprob(t -> 0.5), T, 16; S=3, verbosity=0)[1, 1]
+        @test isapprox(v9, vT; rtol=1e-9)
+
+        # warning contract (first verbosity=1 uses in this session: the sites
+        # below fire exactly once thanks to maxlog=1 — test them here, in order)
+        @test_logs (:warn, r"function-valued delay") match_mode=:any spectralRadiusOfMapping_collocation(
+            mkprob(t -> 0.5), T, 8; S=1, verbosity=1)
+        @test_logs (:warn, r"not an integer multiple") match_mode=:any spectralRadiusOfMapping_collocation(
+            mkprob(0.5 + 1e-3), T, 8; S=1, verbosity=1)
+
+        # (b) CONSTANT INCOMMENSURATE delay (golden ratio — never grid-aligned):
+        # converges to the same limit as the classical path, error shrinking
+        # against a finer vT self-reference.
+        τg = (sqrt(5.0) - 1.0) / 2.0
+        ρ_ref_g = spectralRadiusOfMapping_collocation(mkprob(τg), T, 48; S=3, verbosity=0)
+        ρ_cl_g  = spectralRadiusOfMoment(mkprob(τg), T, 800; method=ClassicalSD(2))
+        @test isapprox(ρ_ref_g, ρ_cl_g; rtol=2e-2)
+        e12 = abs(spectralRadiusOfMapping_collocation(mkprob(τg), T, 12; S=2, verbosity=0) - ρ_ref_g)
+        e24 = abs(spectralRadiusOfMapping_collocation(mkprob(τg), T, 24; S=2, verbosity=0) - ρ_ref_g)
+        @test e24 < e12
+
+        # (c) SMOOTH TIME-VARYING τ(t): measured order ≥ S+1 floor (with slack
+        # 0.5) for both smooth (position) and rough (velocity) delayed reads —
+        # the fractional-limit preintegrated history removes the rough-read cap.
+        τfun(t) = 0.2 + 0.05sin(2π*t)
+        for Bsel in (Bpos, Bvel)
+            probv(τ) = mkprob(τ; B=Bsel)
+            ρref = spectralRadiusOfMapping_collocation(probv(τfun), T, 64; S=3, verbosity=0)
+            for (S, plo, phi, floor_order) in ((1, 16, 32, 1.5), (2, 8, 32, 2.5))
+                e_lo = abs(spectralRadiusOfMapping_collocation(probv(τfun), T, plo; S=S,
+                                                               verbosity=0) - ρref)
+                e_hi = abs(spectralRadiusOfMapping_collocation(probv(τfun), T, phi; S=S,
+                                                               verbosity=0) - ρref)
+                order = log(e_lo / e_hi) / log(phi / plo)
+                @test order ≥ floor_order
+            end
+        end
+        # variance through the unified API on the varying-delay problem
+        vvar = stationaryVariance(mkprob(τfun), T, 32; method=Collocation(3), verbosity=0)
+        vcl  = stationaryVariance(mkprob(τfun), T, 800; method=ClassicalSD(2))
+        @test isapprox(vvar, vcl; rtol=2e-2)
+
+        # (d) ERROR PATHS + CLASS-6 FALLBACK
+        # β ≢ 0 with a varying delay: the direct wrapper refuses …
+        βprob = LDDEProblem(ProportionalMX(Afun), [DelayMX(τfun, Bpos)],
+            [stCoeffMX(1, ProportionalMX(αfun))],
+            [stCoeffMX(1, DelayMX(τfun, t -> @SMatrix [0.0 0.0; 0.1 0.0]))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        @test_throws ErrorException spectralRadiusOfMapping_collocation(
+            βprob, T, 16; S=2, verbosity=0)
+        # … while the unified API falls back to the classical path (identical
+        # result to requesting ClassicalSD(2) explicitly)
+        ρ_fb = spectralRadiusOfMoment(βprob, T, 200; method=Collocation(3), verbosity=0)
+        ρ_cd = spectralRadiusOfMoment(βprob, T, 200; method=ClassicalSD(2))
+        # same code path, but the Krylov start vector is random ⇒ solver-tol agreement
+        @test isapprox(ρ_fb, ρ_cd; rtol=1e-9)
+        # τ(t) < Δt: n_steps below the admissible minimum
+        @test_throws ErrorException spectralRadiusOfMapping_collocation(
+            mkprob(τfun), T, 4; S=2, verbosity=0)
+        # non-monotone reading map (|τ′| too large)
+        @test_throws ErrorException spectralRadiusOfMapping_collocation(
+            mkprob(t -> 0.3 + 0.25sin(2π*t)), T, 16; S=2, verbosity=0)
+    end
+
     @testset "time-periodic (cyclostationary) variance profile" begin
         # τ = 0.5 < T = 1 ⇒ buffer padded to a full period internally
         prob = LDDEProblem(

@@ -101,7 +101,136 @@ multiplication-free evaluation alone is ≈`8.5×10³` faster at `p = 192` (see 
 > faster here. For stability-chart sweeps, keep BLAS single-threaded and
 > parallelise the outer parameter loop with Julia threads instead.
 
-Julia package to investigate the behaviour of the first and second moments of stochastic linear delay differential equations based on the paper 
+## What order to expect — delay type × feedback structure
+
+Since v1.1 the collocation interface also handles **time-varying delays**. The
+problem class is detected automatically from how you *define* the system (no
+switches); whenever the attainable order is below the `2S` that
+`Collocation(S)`/`GaussLegendre(S)` advertises, one warning explains what was
+used and why (silence with `verbosity=0`). The expected second-moment
+convergence order:
+
+| Delay | Delayed read ("feedback") | Engine used | Expected order |
+|---|---|---|---|
+| constant, **grid-aligned** (`τ = r·Δt`) | smooth (position) **or** rough (velocity) | aligned integrated-history (`β≡0`: pruned) | **2S** |
+| constant, **misaligned** (`τ ≠ r·Δt`) | smooth or rough | fractional-limit integrated-history | **[S+1, 2S]** ⚠ |
+| **time-periodic smooth `τ(t)`** (`τ(t) ≥ Δt`) | smooth or rough | fractional-limit integrated-history | **floor S+1**, measured ≈ 2S ⚠ |
+| varying `τ(t)` **with delayed multiplicative noise** (`β ≢ 0`), or multiple delays / Wiener channels | — | classical MF-factored fallback | **1** ⚠ |
+| `ClassicalSD(q)` (any delay) | smooth or rough | classical MF-factored | **1** (any `q`) |
+
+⚠ = one explanatory warning (suppress with `verbosity=0`).
+
+Two structural points worth internalizing:
+
+- **Rough vs smooth reads do not change the order here.** A "rough" read means
+  the delayed term touches a state component that is directly Wiener-driven
+  (e.g. delayed *velocity* feedback — the D part of a PD controller). Point-sampling
+  schemes collapse to ~order 2 on rough reads; the integrated-history blocks of
+  this package evaluate the delayed drift *exactly* from pre-integrated DOFs, so
+  rough and smooth reads converge at the same rate — also with the time-varying
+  delay engine.
+- **Measured, not just promised.** On the spindle-speed-variation (SSV) turning
+  model (sinusoidal `τ(t)`, delay spanning ≈5–8 steps), the measured orders
+  against an independent classical reference are **3.5 at `S=2`** and **5.9 at
+  `S=3`** — at or near the superconvergent `2S`, well above the guaranteed
+  `S+1` floor.
+
+The mini-demos below share this prelude (a 1-DOF oscillator, `d = 2`,
+`x = [position; velocity]`, additive noise on the velocity):
+
+```julia
+using StochasticSemiDiscretizationMethod, StaticArrays
+A(t)  = @SMatrix [0.0 1.0; -(1.0+0.5cos(2π*t)) -0.4]   # smooth, T-periodic drift
+α(t)  = @SMatrix [0.0 0.0; 0.25 0.0]                    # multiplicative noise (present state)
+z2    = @SMatrix zeros(2, 2)
+σ     = @SVector [0.0, 0.3]                             # additive noise → velocity row
+T = 1.0; p = 16                                         # period, steps per period
+mkprob(τ, B; β = t -> z2) =
+    LDDEProblem(ProportionalMX(A), [DelayMX(τ, B)],
+                [stCoeffMX(1, ProportionalMX(α))], [stCoeffMX(1, DelayMX(τ, β))],
+                Additive(2), [stAdditive(1, Additive(σ))])
+```
+
+### Constant aligned delay, smooth read — order 2S
+
+Delayed **position** feedback; `τ = 0.5 = 8·Δt` is an integer number of steps:
+
+```julia
+B(t) = @SMatrix [0.0 0.0; 0.2 0.0]                 # reads x₁ (position): smooth
+prob = mkprob(0.5, B)                               # τ passed as a NUMBER
+ρ    = spectralRadiusOfMoment(prob, T, p)           # aligned engine, order 6 (S=3)
+```
+
+### Constant aligned delay, rough read — still order 2S
+
+Delayed **velocity** feedback (the delayed-D term of a PD controller). The
+velocity is Wiener-driven ("rough"), but the integrated-history blocks keep the
+full order:
+
+```julia
+Bpd(t) = @SMatrix [0.0 0.0; 0.2 0.12]              # reads x₁ AND x₂ (velocity): rough
+ρ = spectralRadiusOfMoment(mkprob(0.5, Bpd), T, p)  # order 2S regardless
+```
+
+### Constant misaligned delay — order in [S+1, 2S]
+
+If `τ` is not an integer multiple of `Δt = T/p`, the fractional-limit engine
+runs and a warning suggests the aligning `n_steps` (often the better fix):
+
+```julia
+ρ = spectralRadiusOfMoment(mkprob(0.618, B), T, p)          # warns: misaligned
+ρ = spectralRadiusOfMoment(mkprob(0.618, B), T, p; verbosity = 0)  # silent
+```
+
+### Time-periodic (smooth) delay — floor S+1, measured ≈ 2S
+
+Pass the delay as a **function** — that is the entire difference. Requirements:
+`τ(t) ≥ Δt` (an error reports the minimum `n_steps`), `τ` T-periodic and smooth,
+and `ξ(t) = t − τ(t)` increasing (|τ′| < 0.9). SSV turning, for example:
+
+```julia
+τfun(t) = 2π / (Ω0 * (1 + RVA * sin(RVF * t)))     # spindle-speed variation
+ρ   = spectralRadiusOfMoment(mkprob(τfun, B), T, p)
+var = stationaryVariance(mkprob(τfun, B), T, p)
+```
+
+Rough reads (`Bpd` above) work identically with `τfun` — same order.
+
+### Delayed multiplicative noise (β ≢ 0)
+
+With a **constant aligned** delay, delayed multiplicative noise is fully
+supported (the engine simply keeps the unpruned block — automatic):
+
+```julia
+βn(t) = @SMatrix [0.0 0.0; 0.1 0.0]                # noise reads the DELAYED state
+ρ = spectralRadiusOfMoment(mkprob(0.5, B; β = βn), T, p)   # order 2S, unpruned
+```
+
+With a **varying** delay this combination is outside the collocation scope: the
+unified interface falls back to the classical factored path (order 1) with a
+warning, and the direct `*_collocation` wrappers raise an error instead.
+
+### Non-smooth coefficients CAN cap the order — for every method
+
+The orders above assume the **coefficients** `A(t), B(t), α(t), σ(t)` are smooth.
+If a coefficient is only `C⁰` (continuous with derivative kinks — e.g. the
+trapezoidal engagement of a *helical* milling cutter) the attainable order caps
+at ≈ **2**; `C¹` coefficients cap at ≈ **3**; genuine jumps (straight-fluted
+milling entry/exit) cap at ≈ **1** — *for every discretization, regardless of
+`S` or `q`*. This is a property of the model, not the method. Practical notes:
+
+- If the kink locations are **fixed in time** (constant spindle speed), choose
+  `n_steps` so that they fall on step boundaries — every step then sees a smooth
+  coefficient and the full order returns.
+- Under SSV the kink times drift, so no uniform mesh aligns with them; expect
+  the ≈2 cap in the asymptotic regime, though the *pre-asymptotic* accuracy at
+  engineering tolerances usually still favours the high-order engine (the kink
+  error carries a small constant).
+- A smoothed coefficient model (e.g. a truncated-Fourier milling force) restores
+  the full order of the smooth-model solution — the modelling error is then a
+  separate, controllable question.
+
+
 [1] [Stochastic semi‐discretization for linear stochastic delay differential equations](https://onlinelibrary.wiley.com/doi/abs/10.1002/nme.6076) and the book
 [2] [Semi-Discretization for Time-Delay Systems (by Insperger and Stepan)](http://link.springer.com/10.1007/978-1-4614-0335-7).
 
