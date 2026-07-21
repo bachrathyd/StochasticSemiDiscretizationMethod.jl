@@ -1,7 +1,7 @@
 name = "StochasticSemiDiscretizationMethod"
 uuid = "048039a2-5e1a-11e9-0eb6-5da22298fca4"
-authors = ["Henrik T. Sykora <henrik1991@gmail.com>", "Dániel Bachrathy <bachrathy@mm.bme.hu>"]
 version = "1.1.0"
+authors = ["Henrik T. Sykora <henrik1991@gmail.com>", "Dániel Bachrathy <bachrathy@mm.bme.hu>"]
 
 [deps]
 Arpack = "7d9fca2a-8960-54d3-9f78-7d1dccf2cb97"
@@ -34,7 +34,7 @@ LinearAlgebra = "1"
 PrecompileTools = "1"
 QuadGK = "2"
 Reexport = "1"
-SemiDiscretizationMethod = "0.3"
+SemiDiscretizationMethod = "0.3, 0.4"
 SparseArrays = "1"
 StaticArrays = "1"
 julia = "1.10"
