@@ -24,7 +24,13 @@ BLAS.set_num_threads(1)
 
 const N_TEETH=2; const PHI_EX = π/4; const Kr=0.3
 const RVA=0.25; const NT=10; const ζ=0.02
-const σc=0.20; const σa=0.10
+# σc = physical value 0.20 (upper end of the identified force-scatter range).
+# Set env SSV_SIGMA_C=1.0 to regenerate the 5×-amplified DEMONSTRATION chart
+# (benchmark/ssv_chart_5x.png): with the physical noise the 2nd-moment boundary
+# ρ(H)=1 hugs the deterministic ρ(Φ)=1 so closely that independently traced
+# finite-resolution MDBM curves visually overlap; amplifying the noise separates
+# them and confirms the near-coincidence is an artifact (pointwise ρ(H) ≥ ρ(Φ)²).
+const σc=parse(Float64, get(ENV, "SSV_SIGMA_C", "0.20")); const σa=0.10
 const VARLIM=0.25
 const R_RES=24; const NAT_RES=30
 const ΩLO=0.125; const ΩHI=1.5; const WHI=4.0
