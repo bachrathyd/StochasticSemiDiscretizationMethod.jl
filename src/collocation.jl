@@ -8,33 +8,53 @@
 #   function-valued smooth τ(t)     → vT fractional-limit engine, floor S+1
 # Delayed multiplicative noise (β ≢ 0) is handled in every case: the aligned
 # engine keeps the unpruned block (v8), and the vT engine adds point-sample DOFs
-# at the delayed reading positions (vT-full). Scope: a single delay and a single
-# Wiener channel; the vT engine additionally requires τ(t) ≥ Δt, T-periodic τ,
-# and a uniformly increasing reading map ξ(t) = t − τ(t).
+# at the delayed reading positions (vT-full), and multiple delays via per-delay
+# history DOFs. Scope: a single Wiener channel; the vT engine additionally
+# requires each τ_j(t) ≥ Δt, T-periodic, with a uniformly increasing reading map.
 
 # Build the engine problem from an `LDDEProblem` over one principal period:
-# `Prob` for a constant delay, `ProbT` for a function-valued delay.
+# `Prob` for a single constant delay, `ProbT` (g delays) otherwise. The delayed
+# multiplicative-noise terms `prob.βs` are paired with the drift delays `prob.Bs`
+# by index (β_j shares τ_j with B_j) — the natural regenerative construction;
+# `βs` may be shorter (missing ⇒ that delay carries no noise).
 function _collocation_prob(prob::LDDEProblem, period::Real)
-    length(prob.Bs) == 1 ||
-        error("the collocation solver supports a single delay term (got $(length(prob.Bs)))")
-    (length(prob.αs) ≤ 1 && length(prob.βs) ≤ 1 && length(prob.σs) ≤ 1) ||
-        error("the collocation solver supports a single Wiener channel")
     d = size(prob.A(0.0), 1)
-    τraw = prob.Bs[1].τ.τ
+    # single Wiener channel: all noise terms must share one nID
+    nids = Int[]
+    for x in prob.αs; push!(nids, x.nID); end
+    for x in prob.βs; push!(nids, x.nID); end
+    for x in prob.σs; push!(nids, x.nID); end
+    length(unique(nids)) ≤ 1 ||
+        error("the collocation solver supports a single Wiener channel (got channels " *
+              "$(sort(unique(nids))))")
+    g = length(prob.Bs)
+    g ≥ 1 || error("the collocation solver needs at least one delay term")
     A = t -> Matrix{Float64}(prob.A(t))
-    B = t -> Matrix{Float64}(prob.Bs[1](t))
     α = isempty(prob.αs) ? (t -> zeros(d, d)) : (t -> Matrix{Float64}(prob.αs[1](t)))
-    β = isempty(prob.βs) ? (t -> zeros(d, d)) : (t -> Matrix{Float64}(prob.βs[1](t)))
     σ = isempty(prob.σs) ? (t -> zeros(d, 1)) :
         (t -> reshape(Vector{Float64}(prob.σs[1].V(t)), d, :))
-    if τraw isa Real
-        return Prob(d, float(period), float(τraw), A, B, α, β, σ)
+    τraws = [prob.Bs[j].τ.τ for j in 1:g]
+    # single constant delay → scalar `Prob` (aligned 2S / incommensurate paths)
+    if g == 1 && (τraws[1] isa Real)
+        B = t -> Matrix{Float64}(prob.Bs[1](t))
+        β = isempty(prob.βs) ? (t -> zeros(d, d)) : (t -> Matrix{Float64}(prob.βs[1](t)))
+        return Prob(d, float(period), float(τraws[1]), A, B, α, β, σ)
     end
-    τf = t -> float(τraw(t))
-    τs = τf.(range(0.0, float(period); length=129))
-    all(isfinite, τs) ||
-        error("the delay function τ(t) returned a non-finite value on [0, T]")
-    ProbT(d, float(period), τf, minimum(τs), maximum(τs), A, B, α, β, σ)
+    # g ≥ 1, function-valued and/or multiple delays → ProbT
+    τfs = Function[]; τmins = Float64[]; τmaxs = Float64[]
+    Bs = Function[]; βs = Function[]
+    for j in 1:g
+        τr = τraws[j]
+        τf = τr isa Real ? (let v = float(τr); t -> v end) : (t -> float(τr(t)))
+        τsamp = τf.(range(0.0, float(period); length=129))
+        all(isfinite, τsamp) ||
+            error("delay τ_$j(t) returned a non-finite value on [0, T]")
+        push!(τfs, τf); push!(τmins, minimum(τsamp)); push!(τmaxs, maximum(τsamp))
+        push!(Bs, t -> Matrix{Float64}(prob.Bs[j](t)))
+        push!(βs, j ≤ length(prob.βs) ? (t -> Matrix{Float64}(prob.βs[j](t))) :
+                  (t -> zeros(d, d)))
+    end
+    ProbT(d, float(period), τfs, τmins, τmaxs, A, Bs, α, βs, σ)
 end
 
 # integer lag r if τ = r·(T/p) within tolerance, else 0
@@ -63,10 +83,10 @@ end
 function _build_collocation(pb::ProbT, S::Integer, p::Integer;
                             force::Bool=false, verbosity::Integer=1)
     verbosity ≥ 1 &&
-        @warn "function-valued delay τ(t): using the time-varying-delay collocation " *
-              "engine — order floor $(S+1) (observed in [$(S+1), $(2S)]); the 2S = $(2S) " *
-              "superconvergence of the constant aligned-delay engine is not attainable " *
-              "for a varying delay. (suppress with verbosity=0)" maxlog=1
+        @warn "using the fractional-limit collocation engine ($(_ndelays(pb)) " *
+              "delay(s), function-valued and/or misaligned) — order floor $(S+1) " *
+              "(observed in [$(S+1), $(2S)]); the 2S superconvergence of the aligned " *
+              "single-constant-delay engine does not apply. (suppress with verbosity=0)" maxlog=1
     build_vT(pb, S, p; force=force)
 end
 
@@ -95,6 +115,9 @@ Delayed **multiplicative** noise (``\\beta \\not\\equiv 0``) is supported in eve
 case: the aligned engine keeps the unpruned block, and the time-varying engine
 adds point-sample DOFs at the delayed reading positions (their covariance filled
 from the same causal kernel), so rough delayed *noise* reads keep the order too.
+**Multiple delays** ``\\sum_j \\mathbf{B}_j\\mathbf{x}(t-\\tau_j(t))`` (single Wiener
+channel) are handled by per-delay integrated-history DOFs sharing the point-sample
+states; the ``\\beta_j`` pair with the ``\\mathbf{B}_j`` by index.
 
 Compared with the classical semi-discretization solvers
 ([`spectralRadiusOfMapping_MF`](@ref) and friends, which are first order in the
@@ -106,7 +129,7 @@ which restricts the method to low/moderate state dimension.
 backward compatibility (no longer meaningful — no noise term is ever dropped).
 Extra `kwargs` (`tol`, `krylovdim`) go to the KrylovKit eigensolver.
 
-Supports a single delay and a single Wiener channel.
+Supports multiple delays (single Wiener channel).
 """
 function spectralRadiusOfMapping_collocation(prob::LDDEProblem, period::Real,
                                              n_steps::Integer; S::Integer=3,
