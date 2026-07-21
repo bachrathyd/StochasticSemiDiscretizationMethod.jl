@@ -4,3 +4,4 @@ StochasticSemiDiscretizationMethod = "048039a2-5e1a-11e9-0eb6-5da22298fca4"
 
 [compat]
 Documenter = "1"
+StochasticSemiDiscretizationMethod = "0.3"
