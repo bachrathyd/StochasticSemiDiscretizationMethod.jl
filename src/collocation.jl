@@ -6,8 +6,10 @@
 #   constant τ, aligned (τ = r·Δt)  → v9/v8 aligned engine, order 2S
 #   constant τ, incommensurate      → vT fractional-limit engine, order [S+1, 2S]
 #   function-valued smooth τ(t)     → vT fractional-limit engine, floor S+1
-# Scope: a single delay and a single Wiener channel; the vT engine additionally
-# requires β ≡ 0 (no delayed multiplicative noise), τ(t) ≥ Δt, T-periodic τ,
+# Delayed multiplicative noise (β ≢ 0) is handled in every case: the aligned
+# engine keeps the unpruned block (v8), and the vT engine adds point-sample DOFs
+# at the delayed reading positions (vT-full). Scope: a single delay and a single
+# Wiener channel; the vT engine additionally requires τ(t) ≥ Δt, T-periodic τ,
 # and a uniformly increasing reading map ξ(t) = t − τ(t).
 
 # Build the engine problem from an `LDDEProblem` over one principal period:
@@ -85,10 +87,14 @@ The engine is selected automatically from the delay of `prob`:
   - **function-valued smooth delay** ``\\tau(t)`` (`DelayMX` built with a function)
     — the fractional-limit time-varying-delay engine, order floor ``S{+}1``.
     Requires ``\\tau(t) \\ge T/p`` (so `n_steps ≥ ceil(T/min τ)`), a T-periodic
-    ``\\tau``, ``\\xi(t)=t-\\tau(t)`` uniformly increasing, and no delayed
-    multiplicative noise (``\\beta \\equiv 0``). Delayed reads of **rough**
-    (Wiener-driven) components carry no extra order penalty — the delayed drift
-    is kept exact in pre-integrated history DOFs, as in the aligned engine.
+    ``\\tau``, and ``\\xi(t)=t-\\tau(t)`` uniformly increasing. Delayed reads of
+    **rough** (Wiener-driven) components carry no extra order penalty — the
+    delayed drift is kept exact in pre-integrated history DOFs.
+
+Delayed **multiplicative** noise (``\\beta \\not\\equiv 0``) is supported in every
+case: the aligned engine keeps the unpruned block, and the time-varying engine
+adds point-sample DOFs at the delayed reading positions (their covariance filled
+from the same causal kernel), so rough delayed *noise* reads keep the order too.
 
 Compared with the classical semi-discretization solvers
 ([`spectralRadiusOfMapping_MF`](@ref) and friends, which are first order in the
@@ -96,9 +102,8 @@ second moment), the collocation blocks reach high order at a much smaller memory
 footprint per accuracy, at the cost of more covariance sub-blocks per delay slot,
 which restricts the method to low/moderate state dimension.
 
-`force=true` forces the β-pruned engine even when ``\\beta \\not\\equiv 0`` — the
-delayed multiplicative noise is then **ignored** (a warning is emitted); use it
-for diagnostics only. `verbosity=0` suppresses the engine-fallback warnings.
+`verbosity=0` suppresses the engine-selection warnings. `force` is accepted for
+backward compatibility (no longer meaningful — no noise term is ever dropped).
 Extra `kwargs` (`tol`, `krylovdim`) go to the KrylovKit eigensolver.
 
 Supports a single delay and a single Wiener channel.
