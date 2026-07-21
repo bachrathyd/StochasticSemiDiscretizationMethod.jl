@@ -116,7 +116,8 @@ convergence order:
 | constant, **misaligned** (`τ ≠ r·Δt`) | smooth or rough | fractional-limit integrated-history | **[S+1, 2S]** ⚠ |
 | **time-periodic smooth `τ(t)`** (`τ(t) ≥ Δt`) | smooth or rough | fractional-limit integrated-history | **floor S+1**, measured ≈ 2S ⚠ |
 | any of the above **with delayed multiplicative noise** (`β ≢ 0`) | smooth or rough | integrated-history + point-sample DOFs | as above (aligned **2S**; varying **floor S+1**) ⚠ |
-| multiple delays / Wiener channels | — | classical MF-factored fallback | **1** ⚠ |
+| **multiple delays** `Σⱼ Bⱼ x(t−τⱼ(t))` (single Wiener channel) | smooth or rough | per-delay integrated-history + shared point-sample DOFs | as above ⚠ |
+| multiple Wiener channels (independent noise) | — | classical MF-factored fallback | **1** ⚠ |
 | `ClassicalSD(q)` (any delay) | smooth or rough | classical MF-factored | **1** (any `q`) |
 
 ⚠ = one explanatory warning (suppress with `verbosity=0`).

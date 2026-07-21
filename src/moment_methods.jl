@@ -33,9 +33,12 @@ Delayed **multiplicative** noise (``\\beta \\not\\equiv 0``) is supported for
 every delay class: the block additionally carries point-sample DOFs at the
 delayed reading positions, filled from the same causal kernel, so rough delayed
 *noise* reads keep the order too (aligned ``2S``, varying floor ``S{+}1``).
+**Multiple delays** ``\\sum_j \\mathbf{B}_j\\,\\mathbf{x}(t-\\tau_j(t))`` are also
+handled — each delay carries its own integrated-history DOFs and shares the
+point-sample states; the ``\\beta_j`` pair with the ``\\mathbf{B}_j`` by index.
 
-The default and recommended method; restricted to a single delay and a single
-Wiener channel. Multiple delays or Wiener channels automatically fall back to
+The default and recommended method; restricted to a **single Wiener channel**.
+Multiple independent Wiener channels automatically fall back to
 [`ClassicalSD`](@ref)`(2)` with a warning. `GaussLegendre` is an alias.
 """
 struct Collocation <: MomentMethod
@@ -82,14 +85,15 @@ function _classical_result(prob::LDDEProblem, period::Real, n_steps::Integer, q:
 end
 
 # Collocation applicability: returns `nothing` when the collocation engines can
-# handle `prob`, else a human-readable reason for the classical fallback. Delayed
-# multiplicative noise (β ≢ 0) with a time-varying or grid-misaligned delay is
-# now handled by the fractional-limit engine (vT-full), so only multiple delays
-# or Wiener channels fall back.
+# handle `prob`, else a human-readable reason for the classical fallback. Multiple
+# delays and delayed multiplicative noise are handled by the vT engine; only
+# multiple Wiener channels (independent noise sources) still fall back.
 function _collocation_blocked(prob::LDDEProblem, period::Real, n_steps::Integer)
-    length(prob.Bs) == 1 || return "multiple delay terms ($(length(prob.Bs)))"
-    (length(prob.αs) ≤ 1 && length(prob.βs) ≤ 1 && length(prob.σs) ≤ 1) ||
-        return "multiple Wiener channels"
+    nids = Int[]
+    for x in prob.αs; push!(nids, x.nID); end
+    for x in prob.βs; push!(nids, x.nID); end
+    for x in prob.σs; push!(nids, x.nID); end
+    length(unique(nids)) ≤ 1 || return "multiple Wiener channels ($(sort(unique(nids))))"
     nothing
 end
 

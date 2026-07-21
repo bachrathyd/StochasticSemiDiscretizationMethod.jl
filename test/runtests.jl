@@ -189,7 +189,7 @@ function tests()
 
         # warning contract (first verbosity=1 uses in this session: the sites
         # below fire exactly once thanks to maxlog=1 — test them here, in order)
-        @test_logs (:warn, r"function-valued delay") match_mode=:any spectralRadiusOfMapping_collocation(
+        @test_logs (:warn, r"fractional-limit collocation engine") match_mode=:any spectralRadiusOfMapping_collocation(
             mkprob(t -> 0.5), T, 8; S=1, verbosity=1)
         @test_logs (:warn, r"not an integer multiple") match_mode=:any spectralRadiusOfMapping_collocation(
             mkprob(0.5 + 1e-3), T, 8; S=1, verbosity=1)
@@ -303,6 +303,63 @@ function tests()
                                                      verbosity=0)
         ρ_fcl = spectralRadiusOfMoment(mkprob(τfast), T, 400; method=ClassicalSD(2))
         @test isapprox(ρ_fast, ρ_fcl; rtol=1e-2)
+    end
+
+    @testset "multiple delays (vT g>1)" begin
+        SSM = StochasticSemiDiscretizationMethod
+        T = 1.0
+        Am = t -> [0.0 1.0; -(1.0+0.5cos(2π*t)) -0.4]
+        αm = t -> [0.0 0.0; 0.25 0.0]
+        σm = t -> reshape([0.0, 0.3], 2, 1)
+        zm = t -> zeros(2,2)
+        smp(τf) = (s = τf.(range(0,T;length=129)); (minimum(s), maximum(s)))
+        # direct ProbT (heterogeneous closures allowed; LDDEProblem needs uniform types)
+        function mkPT(τfs, Bs, βs)
+            mn=Float64[]; mx=Float64[]
+            for τf in τfs; (a,b)=smp(τf); push!(mn,a); push!(mx,b); end
+            SSM.ProbT(2, T, Function[τfs...], mn, mx, Am, Function[Bs...], αm,
+                      Function[βs...], σm)
+        end
+        ρ(pt,S,p) = SSM.rho_H_krylov_v9m(SSM.build_vT(pt,S,p))
+
+        # EXACT equal-delay reduction: {τ,B1,β1}+{τ,B2,β2} ≡ {τ,B1+B2,β1+β2}
+        for τf in (t->0.5, t->0.30+0.05sin(2π*t)), S in (2,3)
+            B1=t->[0.0 0.0; 0.15 0.0]; B2=t->[0.0 0.0; 0.07 0.0]
+            β1=t->[0.0 0.0; 0.10 0.0]; β2=t->[0.0 0.0; 0.05 0.0]
+            Bsum=t->[0.0 0.0; 0.22 0.0]; βsum=t->[0.0 0.0; 0.15 0.0]
+            r2 = ρ(mkPT([τf,τf],[B1,B2],[β1,β2]), S, 16)
+            r1 = ρ(mkPT([τf],[Bsum],[βsum]), S, 16)
+            @test isapprox(r2, r1; rtol=1e-10)
+        end
+
+        # g=2 distinct varying delays, mixed β (delay 2 noise-free): high order
+        let
+            B1=t->[0.0 0.0; 0.18 0.0]; B2=t->[0.0 0.0; 0.09 0.0]
+            β1=t->[0.0 0.0; 0.10 0.0]
+            τ1=t->0.30+0.06sin(2π*t); τ2=t->0.50+0.05cos(2π*t)
+            pt=mkPT([τ1,τ2],[B1,B2],[β1,zm])
+            ρref=ρ(pt,3,64)
+            e_lo=abs(ρ(pt,2,16)-ρref); e_hi=abs(ρ(pt,2,32)-ρref)
+            @test log2(e_lo/e_hi) ≥ 2.5
+        end
+
+        # public API: constant 2-delay problem (uniform SMatrix) vs classical
+        let
+            prob = LDDEProblem(
+                ProportionalMX(t -> @SMatrix [0.0 1.0; -1.0 -0.4]),
+                [DelayMX(0.5,  @SMatrix [0.0 0.0; 0.15 0.0]),
+                 DelayMX(0.75, @SMatrix [0.0 0.0; 0.08 0.0])],
+                [stCoeffMX(1, ProportionalMX(@SMatrix [0.0 0.0; 0.2 0.0]))],
+                [stCoeffMX(1, DelayMX(0.5,  @SMatrix [0.0 0.0; 0.1 0.0])),
+                 stCoeffMX(1, DelayMX(0.75, @SMatrix [0.0 0.0; 0.05 0.0]))],
+                Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))], 1)
+            ρc = spectralRadiusOfMoment(prob, T, 24; method=Collocation(3), verbosity=0)
+            ρs = spectralRadiusOfMoment(prob, T, 500; method=ClassicalSD(2))
+            @test isapprox(ρc, ρs; rtol=1e-2)
+            vc = stationaryVariance(prob, T, 24; method=Collocation(3), verbosity=0)
+            vs = stationaryVariance(prob, T, 500; method=ClassicalSD(2))
+            @test isapprox(vc, vs; rtol=2e-2)
+        end
     end
 
     @testset "time-periodic (cyclostationary) variance profile" begin
