@@ -115,7 +115,8 @@ convergence order:
 | constant, **grid-aligned** (`τ = r·Δt`) | smooth (position) **or** rough (velocity) | aligned integrated-history (`β≡0`: pruned) | **2S** |
 | constant, **misaligned** (`τ ≠ r·Δt`) | smooth or rough | fractional-limit integrated-history | **[S+1, 2S]** ⚠ |
 | **time-periodic smooth `τ(t)`** (`τ(t) ≥ Δt`) | smooth or rough | fractional-limit integrated-history | **floor S+1**, measured ≈ 2S ⚠ |
-| varying `τ(t)` **with delayed multiplicative noise** (`β ≢ 0`), or multiple delays / Wiener channels | — | classical MF-factored fallback | **1** ⚠ |
+| any of the above **with delayed multiplicative noise** (`β ≢ 0`) | smooth or rough | integrated-history + point-sample DOFs | as above (aligned **2S**; varying **floor S+1**) ⚠ |
+| multiple delays / Wiener channels | — | classical MF-factored fallback | **1** ⚠ |
 | `ClassicalSD(q)` (any delay) | smooth or rough | classical MF-factored | **1** (any `q`) |
 
 ⚠ = one explanatory warning (suppress with `verbosity=0`).
@@ -212,17 +213,20 @@ modulation period.) Rough reads (`Bpd` above) work identically — same order.
 
 ### Delayed multiplicative noise (β ≢ 0)
 
-With a **constant aligned** delay, delayed multiplicative noise is fully
-supported (the engine simply keeps the unpruned block — automatic):
+Delayed multiplicative noise is supported for **every** delay class — constant
+aligned (order 2S) and smooth time-varying (floor S+1) alike. The engine stores
+point-sample DOFs at the delayed reading positions and fills their covariance
+from the same causal two-time kernel, so **rough** delayed-noise reads (β on a
+Wiener-driven row) carry no order penalty:
 
 ```julia
 βn(t) = @SMatrix [0.0 0.0; 0.1 0.0]                # noise reads the DELAYED state
-ρ = spectralRadiusOfMoment(mkprob(0.5, B; β = βn), T, p)   # order 2S, unpruned
+ρ = spectralRadiusOfMoment(mkprob(0.5,  B; β = βn), T, p)   # aligned → order 2S
+ρ = spectralRadiusOfMoment(mkprob(τfun, B; β = βn), T, p)   # varying → floor S+1
 ```
 
-With a **varying** delay this combination is outside the collocation scope: the
-unified interface falls back to the classical factored path (order 1) with a
-warning, and the direct `*_collocation` wrappers raise an error instead.
+Only multiple delays or multiple Wiener channels remain outside the collocation
+scope; those fall back to the classical factored path with a warning.
 
 ### Non-smooth coefficients CAN cap the order — for every method
 

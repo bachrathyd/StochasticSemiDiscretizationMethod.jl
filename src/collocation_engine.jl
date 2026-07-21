@@ -1248,8 +1248,21 @@ end
 # replacing {c, 1}. Padding: blocks whose breakpoint count is below the global
 # max NJ duplicate the full-block DOF (readers never reference pads).
 #
-# Block layout (BSIZE = (NJ+1)d): [x_e; G_1..G_NJ].
-# Requires: τ(t) ≥ h, ξ′ ≥ 0.1, τ T-periodic, single delay, β ≡ 0.
+# Delayed MULTIPLICATIVE noise (β ≢ 0, "vT-full"): the delayed noise enters the
+# second moment as a POINTWISE Itô-isometry contraction β·x(ξ(t_nk))·βᵀ — no
+# integral to preintegrate. Store the sample as a DOF D_k = x(v_k) at each
+# breakpoint (dense-output row + exact within-step causal covariance Σn(θ_k)):
+# a diagonal-kink-free causal point read, NOT a covariance interpolation. Reading
+# stage k contracts v8's full Egg (α Mxx αᵀ + α Mxd βᵀ + β Mxdᵀ αᵀ + β Mdd βᵀ +
+# σσᵀ) with a selector on the stored D (a block-boundary image resolves to a
+# neighbouring x_e). At a stage node the dense output equals the stage value
+# (ℓint_j(c_k)=a_kj), so an aligned constant τ reduces D_k ≡ v8's Y_k and the
+# whole engine reduces to v8 exactly. Order floor S+1 (measured near 2S; rough
+# delayed-noise reads carry no penalty — the delayed-path covariance is smooth).
+#
+# Block layout: β ≡ 0 → BSIZE=(NJ+1)d [x_e; G_1..G_NJ] (ND=0, pruned);
+#               β ≢ 0 → BSIZE=(2NJ+1)d [x_e; G_1..G_NJ; D_1..D_NJ] (ND=NJ).
+# Requires: τ(t) ≥ h, ξ′ ≥ 0.1, τ T-periodic, single delay, single Wiener channel.
 # =============================================================================
 
 struct ProbT
@@ -1290,29 +1303,37 @@ function _xi_inv(pb::ProbT, u)
 end
 
 struct StepVT
-    Pblock::Matrix{Float64}        # BSIZE×W new-block rows [x_e; G_1..G_NJ]
+    Pblock::Matrix{Float64}        # BSIZE×W new-block rows [x_e; G_1..G_NJ] (β≡0)
+                                   #   or [x_e; G_1..G_NJ; D_1..D_NJ] (β≢0)
     Yrows::Matrix{Float64}         # Sd×W stage rows (computed, NOT persisted)
     As::Vector{Matrix{Float64}}; αs::Vector{Matrix{Float64}}
+    βs::Vector{Matrix{Float64}}    # delayed multiplicative noise at the S stages
     σs::Vector{Matrix{Float64}}
+    Dsel::Vector{Matrix{Float64}}  # S selector rows: x(ξ(t_n+c_k h)) from the window
     Bt::Function                   # memoized θ ∈ [0,1] ↦ B̃(t_n + θh)  (d×d)
     θbrk::Vector{Float64}          # NJ breakpoints (θ units; pads = 1.0)
     nbrk::Int                      # genuine breakpoints (θbrk[nbrk] == 1.0)
     a::Matrix{Float64}; b::Vector{Float64}; c::Vector{Float64}
     lcoef::Vector{Vector{Float64}}
     φstage::Vector{Matrix{Float64}}
-    h::Float64; d::Int; S::Int; W::Int; BSIZE::Int; r::Int; NJ::Int
+    h::Float64; d::Int; S::Int; W::Int; BSIZE::Int; r::Int; NJ::Int; ND::Int
 end
 
 # One reading piece: window slot `lag` (0-based), G index `idx` (0 = block
 # start ⇒ contributes nothing), sign ±1.
 const _VTPiece = Tuple{Int,Int,Float64}
+# One noise point-read resolution: window slot, kind (0 = x_e of the slot,
+# 1 = D at breakpoint `bp` of the slot), breakpoint index.
+const _VTRead = Tuple{Int,Int,Int}
 
 function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf,
                  θbrk::Vector{Float64}, nbrk::Int,
-                 readmap::Vector{Vector{_VTPiece}})
-    d=pb.d; S=length(c); NJ=length(θbrk); BSIZE=(NJ+1)*d; W=(r_buf+1)*BSIZE
+                 readmap::Vector{Vector{_VTPiece}}, ND::Int,
+                 noiseread::Vector{_VTRead})
+    d=pb.d; S=length(c); NJ=length(θbrk); BSIZE=(NJ+1+ND)*d; W=(r_buf+1)*BSIZE
     As=[Matrix(pb.A(t_n+c[i]*h)) for i in 1:S]
     αs=[Matrix(pb.α(t_n+c[i]*h)) for i in 1:S]
+    βs=[Matrix(pb.β(t_n+c[i]*h)) for i in 1:S]
     σs=[Matrix(pb.σ(t_n+c[i]*h)) for i in 1:S]
     # global weight B̃ on THIS block, memoized per θ (bisection runs once per node)
     Btcache=Dict{Float64,Matrix{Float64}}()
@@ -1380,12 +1401,35 @@ function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf,
     for k in nbrk+1:NJ                          # pads duplicate the full-block DOF
         Grows[(k-1)*d+1:k*d, :] .= Grows[(nbrk-1)*d+1:nbrk*d, :]
     end
-    Pblock=vcat(erow, Grows)
+    # D rows (β≢0 only): point samples D_k = x(θbrk[k]·h) via the dense output
+    #   x(θh) = x_n + h Σ_j ℓint_j(θ) K_j  (linear map of the window). Stored so
+    # future steps can read the delayed multiplicative-noise sample. Pads (θ=1)
+    # are never read (noise reads at a block end resolve to x_e).
+    Drows = ND > 0 ? zeros(ND*d, W) : zeros(0, W)
+    if ND > 0
+        for k in 1:NJ
+            θk = θbrk[k]
+            Drows[(k-1)*d+1:k*d, xn_rng] .= Id
+            for j in 1:S
+                Drows[(k-1)*d+1:k*d, :] .+= (h*_lint(lcoef[j], θk)).*Krows[(j-1)*d+1:j*d, :]
+            end
+        end
+    end
+    Pblock = ND > 0 ? vcat(erow, Grows, Drows) : vcat(erow, Grows)
+    # noise-read selectors: x(ξ(t_n+c_k h)) as a pure selector into the window
+    Dsel = [zeros(d, W) for _ in 1:S]
+    if ND > 0
+        for k in 1:S
+            (slot, kind, bp) = noiseread[k]
+            base = kind == 0 ? slot*BSIZE : slot*BSIZE + (NJ+bp)*d   # x_e vs D_bp
+            for q in 1:d; Dsel[k][q, base+q] = 1.0; end
+        end
+    end
     RHSΦ=zeros(S*d, d); for i in 1:S; RHSΦ[(i-1)*d+1:i*d, :] .= Id; end
     Φstack=Minv*RHSΦ
     φstage=[Φstack[(k-1)*d+1:k*d, :] for k in 1:S]
-    return StepVT(Pblock, Yrows, As, αs, σs, Bt, θbrk, nbrk, a, b, c, lcoef,
-                  φstage, h, d, S, W, BSIZE, r_buf, NJ)
+    return StepVT(Pblock, Yrows, As, αs, βs, σs, Dsel, Bt, θbrk, nbrk, a, b, c, lcoef,
+                  φstage, h, d, S, W, BSIZE, r_buf, NJ, ND)
 end
 
 # helpers mirroring the v9 versions but taking a StepVT
@@ -1409,13 +1453,19 @@ _ΔkerT(st::StepVT, θa, θb, Σs, Egg, φc) =
 # ΔB for the vT block [x_e; G_1..G_NJ]: identical causal-kernel machinery to
 # noise_block_v9m with Bf(θh) → B̃(t_n+θh) and {c,1} → the breakpoint list.
 function noise_block_vT(st::StepVT, C)
-    d=st.d; S=st.S; h=st.h; a=st.a; b=st.b; BSIZE=st.BSIZE; NJ=st.NJ
+    d=st.d; S=st.S; h=st.h; a=st.a; b=st.b; BSIZE=st.BSIZE; NJ=st.NJ; ND=st.ND
     Id=Matrix{Float64}(I,d,d)
     Egg=Vector{Matrix{Float64}}(undef,S)
     for k in 1:S
         Yk=@view st.Yrows[(k-1)*d+1:k*d, :]
         Mxx=Yk*C*Yk'
         e = st.αs[k]*Mxx*st.αs[k]' .+ st.σs[k]*st.σs[k]'
+        if ND > 0                                   # delayed multiplicative noise
+            Dk=st.Dsel[k]
+            Mxd=Yk*C*Dk'; Mdd=Dk*C*Dk'
+            e = e .+ st.αs[k]*Mxd*st.βs[k]' .+ st.βs[k]*Mxd'*st.αs[k]' .+
+                st.βs[k]*Mdd*st.βs[k]'
+        end
         Egg[k]=(e.+e')./2
     end
     d2=d*d
@@ -1469,6 +1519,41 @@ function noise_block_vT(st::StepVT, C)
         ΔB[rng_G(i), rng_G(j)] .= V
         i != j && (ΔB[rng_G(j), rng_G(i)] .= V')
     end
+    if ND > 0
+        # D point-sample DOFs: exact within-step noise covariance via the SAME
+        # causal kernel. D–D and D–x_e are point–point (no quadrature); G–D is
+        # the only integrated cross and MUST split the quadrature at θ_k.
+        rng_D(k) = ((NJ+k)*d+1 : (NJ+k+1)*d)
+        # D_k – x_e  =  Δ(θ_k, 1)
+        for k in 1:NJ
+            θk=st.θbrk[k]
+            V = _ΔkerT(st, θk, 1.0, Σs, Egg, φc)
+            ΔB[rng_D(k), 1:d] .= V; ΔB[1:d, rng_D(k)] .= V'
+        end
+        # D_i – D_j  =  Δ(θ_i, θ_j)   (diagonal i=j gives Σn(θ_i))
+        for i in 1:NJ, j in 1:NJ
+            j < i && continue
+            V = _ΔkerT(st, st.θbrk[i], st.θbrk[j], Σs, Egg, φc)
+            ΔB[rng_D(i), rng_D(j)] .= V
+            i != j && (ΔB[rng_D(j), rng_D(i)] .= V')
+        end
+        # G_i – D_k  =  ∫_0^{θ_Gi} B̃(u) Δ(u, θ_k) du   (split at θ_k)
+        for i in 1:NJ, k in 1:NJ
+            θG=st.θbrk[i]; θk=st.θbrk[k]; acc=zeros(d,d)
+            if θG > 1e-14
+                segs = θk<θG ? ((0.0,θk),(θk,θG)) : ((0.0,θG),)
+                for (lo,hi) in segs
+                    hi<=lo && continue
+                    for (gx,gw) in zip(_G8.x,_G8.w)
+                        u=lo+(hi-lo)*gx
+                        acc .+= ((hi-lo)*gw).*(st.Bt(u)*_ΔkerT(st,u,θk,Σs,Egg,φc))
+                    end
+                end
+            end
+            V=h.*acc
+            ΔB[rng_G(i), rng_D(k)] .= V; ΔB[rng_D(k), rng_G(i)] .= V'
+        end
+    end
     return ΔB
 end
 
@@ -1491,13 +1576,11 @@ end
 rho_U_vT(eng)=maximum(abs.(eigen(eng.U).values))
 
 function build_vT(pb::ProbT, S, p; force=false, want_U::Bool=false)
-    if !_no_delay_noise(pb)
-        force || error("the time-varying-delay collocation engine supports no delayed " *
-            "multiplicative noise (β ≡ 0); use method=ClassicalSD(q) for β ≢ 0, or " *
-            "force=true to IGNORE the delayed noise (diagnostics only)")
-        @warn "build_vT(force=true) on a problem with β ≢ 0: the delayed " *
-              "multiplicative noise is IGNORED — diagnostics only, ρ will be wrong" maxlog=1
-    end
+    # β ≢ 0 (delayed multiplicative noise) is SUPPORTED: the block then also
+    # carries point-sample DOFs D_k at the reading-image breakpoints (vT-full);
+    # β ≡ 0 prunes them and reduces to the drift-only vT. `force` is accepted for
+    # backward compatibility (no longer meaningful — nothing is ignored).
+    has_beta = !_no_delay_noise(pb)
     a,b,c=gl_tab(S); h=pb.T/p
     pb.τmin > 0.0 ||
         error("the delay must be positive: sampled min τ(t) = $(pb.τmin) ≤ 0")
@@ -1599,9 +1682,35 @@ function build_vT(pb::ProbT, S, p; force=false, want_U::Bool=false)
         end
         readmaps[n]=rm
     end
+    # ---- noise point-reads (β≢0 only): stage k of step n reads x(ξ(t_n+c_k h)),
+    # the hi-limit of its drift integral. Resolve to a window selector: interior
+    # image → D at that breakpoint; a block-boundary image → the x_e endpoint of
+    # the adjacent block (a start-snap goes to the NEXT-OLDER block's x_e — the
+    # drift skips this bidx=0 point, but the noise point read must not).
+    ND = has_beta ? NJ : 0
+    noisereads=Vector{Vector{_VTRead}}(undef,p)
+    for n in 1:p
+        nr=Vector{_VTRead}(undef,S)
+        for k in 1:S
+            (jhi,θhi)=locs[n][k+1]
+            if θhi == 0.0
+                slot=(n-1)-(jhi-1)                 # x_e of block jhi−1 (older)
+                nr[k]=(slot, 0, 0)
+            elseif θhi == 1.0
+                slot=(n-1)-jhi                      # x_e of block jhi
+                nr[k]=(slot, 0, 0)
+            else
+                slot=(n-1)-jhi
+                nr[k]=(slot, 1, bidx(jhi,θhi))      # D at the interior breakpoint
+            end
+            0 <= nr[k][1] <= r_buf || error("internal vT bookkeeping error: noise " *
+                "read slot $(nr[k][1]) out of range 0..$r_buf (n=$n, k=$k) — please report")
+        end
+        noisereads[n]=nr
+    end
     # ---- per-step builds (class of the block STORED by step n is cls(n))
     steps=[step_vT(pb, a, b, c, h, (n-1)*h, r_buf, θbrks[cls(n)], nbrks[cls(n)],
-                   readmaps[n]) for n in 1:p]
+                   readmaps[n], ND, noisereads[n]) for n in 1:p]
     W=steps[1].W; BSIZE=steps[1].BSIZE
     eng=(steps=steps, W=W, BSIZE=BSIZE, p=p, r=r_buf, d=pb.d, NJ=NJ, engine=:vT)
     if want_U

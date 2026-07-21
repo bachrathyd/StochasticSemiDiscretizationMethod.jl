@@ -86,7 +86,8 @@ less than `2S` is attainable (silence with `verbosity = 0`):
 | constant, grid-aligned (`τ = r·Δt`) | aligned integrated-history | **2S** |
 | constant, misaligned | fractional-limit integrated-history | [S+1, 2S] |
 | time-periodic smooth `τ(t) ≥ Δt` | fractional-limit integrated-history | floor S+1, measured ≈ 2S |
-| varying `τ(t)` with `β ≢ 0`, or multiple delays/channels | classical MF-factored fallback | 1 |
+| any of the above with delayed multiplicative noise `β ≢ 0` | integrated-history + point-sample DOFs | aligned 2S, varying floor S+1 |
+| multiple delays or Wiener channels | classical MF-factored fallback | 1 |
 
 Rough (Wiener-driven) delayed reads — e.g. delayed *velocity* feedback — do
 **not** reduce the order of any collocation engine: the delayed drift is kept

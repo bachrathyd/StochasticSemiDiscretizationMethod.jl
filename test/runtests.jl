@@ -226,41 +226,63 @@ function tests()
         vcl  = stationaryVariance(mkprob(τfun), T, 800; method=ClassicalSD(2))
         @test isapprox(vvar, vcl; rtol=2e-2)
 
-        # (d) ERROR PATHS + CLASS-6 FALLBACK
-        # β ≢ 0 with a varying delay: the direct wrapper refuses …
-        βprob = LDDEProblem(ProportionalMX(Afun), [DelayMX(τfun, Bpos)],
-            [stCoeffMX(1, ProportionalMX(αfun))],
-            [stCoeffMX(1, DelayMX(τfun, t -> @SMatrix [0.0 0.0; 0.1 0.0]))],
+        # (d) DELAYED MULTIPLICATIVE NOISE (β ≢ 0) — vT-full engine
+        βsm(t) = @SMatrix [0.0 0.0; 0.12 0.0]      # delayed noise reads position (smooth)
+        βrg(t) = @SMatrix [0.0 0.0; 0.0 0.12]      # delayed noise reads velocity (rough)
+        mkβ(τ, βmx; B=Bpos) = LDDEProblem(ProportionalMX(Afun), [DelayMX(τ, B)],
+            [stCoeffMX(1, ProportionalMX(αfun))], [stCoeffMX(1, DelayMX(τ, βmx))],
             Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        # aligned constant τ + β≢0: the function-valued vT-full path must reproduce
+        # the aligned v8 engine (reached by the constant-τ path), smooth AND rough read
+        for βmx in (βsm, βrg), S in (2, 3)
+            ρv8 = spectralRadiusOfMapping_collocation(mkβ(0.5, βmx), T, 16; S=S)
+            ρvT = spectralRadiusOfMapping_collocation(mkβ(t -> 0.5, βmx), T, 16; S=S,
+                                                      verbosity=0)
+            @test isapprox(ρv8, ρvT; rtol=1e-8)
+        end
+        # varying τ(t) + β≢0: measured order ≥ S+0.5 (S=2) for BOTH read types —
+        # the delayed multiplicative noise carries no rough-read order collapse.
+        # Delay τβ ≈ 0.3 (spans several steps) + a wide p-gap and an S=3 reference
+        # keep the coarse-p errors well above the reference floor (a 2-point p=12/24
+        # window against a p=64 S=3 ref sits ON the floor — negative slope noise).
+        τβ(t) = 0.30 + 0.06sin(2π*t)
+        for βmx in (βsm, βrg)
+            ρref = spectralRadiusOfMapping_collocation(mkβ(τβ, βmx), T, 96; S=3,
+                                                       verbosity=0)
+            e_lo = abs(spectralRadiusOfMapping_collocation(mkβ(τβ, βmx), T, 12; S=2,
+                                                           verbosity=0) - ρref)
+            e_hi = abs(spectralRadiusOfMapping_collocation(mkβ(τβ, βmx), T, 48; S=2,
+                                                           verbosity=0) - ρref)
+            @test log(e_lo / e_hi) / log(4) ≥ 2.5
+        end
+        # β≢0 stationary variance through the unified API (no classical fallback)
+        vβ = stationaryVariance(mkβ(τfun, βsm), T, 32; method=Collocation(3), verbosity=0)
+        vβcl = stationaryVariance(mkβ(τfun, βsm), T, 800; method=ClassicalSD(2))
+        @test isapprox(vβ, vβcl; rtol=3e-2)
+        # block-boundary snap of a noise point-read (Finding 4): a constant delay
+        # τ=(2+c₁)·Δt places stage 1's delayed image exactly on a block boundary,
+        # so its noise read resolves to a neighbouring x_e rather than a D — a branch
+        # the aligned reduction (interior-node reads) never reaches. Verify it runs
+        # and self-converges to the fine-p value.
+        c1 = StochasticSemiDiscretizationMethod.gl_tab(2)[3][1]
+        τbnd = (2 + c1) / 16
+        ρbnd = spectralRadiusOfMapping_collocation(mkβ(τbnd, βsm), T, 16; S=2, verbosity=0)
+        ρbndref = spectralRadiusOfMapping_collocation(mkβ(τbnd, βsm), T, 64; S=2, verbosity=0)
+        @test isfinite(ρbnd) && isapprox(ρbnd, ρbndref; rtol=1e-2)
+
+        # (d2) GENUINE ERROR PATHS (still error regardless of β)
         @test_throws ErrorException spectralRadiusOfMapping_collocation(
-            βprob, T, 16; S=2, verbosity=0)
-        # … while the unified API falls back to the classical path (identical
-        # result to requesting ClassicalSD(2) explicitly)
-        ρ_fb = spectralRadiusOfMoment(βprob, T, 200; method=Collocation(3), verbosity=0)
-        ρ_cd = spectralRadiusOfMoment(βprob, T, 200; method=ClassicalSD(2))
-        # same code path, but the Krylov start vector is random ⇒ solver-tol agreement
-        @test isapprox(ρ_fb, ρ_cd; rtol=1e-9)
-        # τ(t) < Δt: n_steps below the admissible minimum
+            mkprob(τfun), T, 4; S=2, verbosity=0)           # τ(t) < Δt
         @test_throws ErrorException spectralRadiusOfMapping_collocation(
-            mkprob(τfun), T, 4; S=2, verbosity=0)
-        # non-monotone reading map (τ′ > 0.9); τmin = 0.3 > Δt so this genuinely
-        # reaches the ξ′ check, not the τ ≥ Δt guard
-        @test_throws ErrorException spectralRadiusOfMapping_collocation(
-            mkprob(t -> 0.5 + 0.2sin(2π*t)), T, 16; S=2, verbosity=0)
-        # misaligned constant delay + β ≢ 0: unified API falls back to classical
-        # (regression for the erroring middle class), and collocation-only kwargs
-        # are ignored on the fallback path rather than crashing the classical solver
-        βmis = LDDEProblem(ProportionalMX(Afun), [DelayMX(0.501, Bpos)],
-            [stCoeffMX(1, ProportionalMX(αfun))],
-            [stCoeffMX(1, DelayMX(0.501, t -> @SMatrix [0.0 0.0; 0.1 0.0]))],
-            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
-        ρ_mfb = spectralRadiusOfMoment(βmis, T, 100; method=Collocation(3),
-                                       verbosity=0, tol=1e-9, force=true)
-        ρ_mcd = spectralRadiusOfMoment(βmis, T, 100; method=ClassicalSD(2))
-        @test isapprox(ρ_mfb, ρ_mcd; rtol=1e-9)
-        v_mfb = stationaryVariance(βmis, T, 100; method=Collocation(3),
-                                   verbosity=0, tol=1e-9)
-        @test isfinite(v_mfb) && v_mfb > 0
+            mkprob(t -> 0.5 + 0.2sin(2π*t)), T, 16; S=2, verbosity=0)  # τ′ > 0.9
+        # multiple Wiener channels still fall back to classical
+        βmc = LDDEProblem(ProportionalMX(Afun), [DelayMX(τfun, Bpos)],
+            [stCoeffMX(1, ProportionalMX(αfun))], [stCoeffMX(1, DelayMX(τfun, βsm))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3])),
+                          stAdditive(2, Additive(@SVector [0.0, 0.2]))])
+        ρ_mc = spectralRadiusOfMoment(βmc, T, 200; method=Collocation(3), verbosity=0)
+        @test isapprox(ρ_mc, spectralRadiusOfMoment(βmc, T, 200; method=ClassicalSD(2));
+                       rtol=1e-9)
 
         # (e) HARD-REGIME ANCHORS (reviewer round 1)
         # noise-off gate on a genuinely time-varying configuration: ρ(H) = ρ(U)²

@@ -160,15 +160,18 @@ Rough reads (`Bpd`) work identically.
 
 ### Delayed multiplicative noise (β ≢ 0)
 
-Fully supported with a **constant aligned** delay (the unpruned block is used
-automatically). With a **varying** delay this combination falls back to the
-classical factored path (order 1) with a warning:
+Supported for **every** delay class. The block additionally carries point-sample
+DOFs at the delayed reading positions, filled from the same causal two-time
+kernel, so the order matches the drift-only case (aligned `2S`, varying floor
+`S+1`) and **rough** delayed-noise reads carry no penalty:
 
 ```julia
 βn(t) = @SMatrix [0.0 0.0; 0.1 0.0]         # noise reads the delayed state
-ρ = spectralRadiusOfMoment(mkprob(0.5,  B; β = βn), T, p)  # order 2S, unpruned
-ρ = spectralRadiusOfMoment(mkprob(τfun, B; β = βn), T, p)  # classical fallback + warning
+ρ = spectralRadiusOfMoment(mkprob(0.5,  B; β = βn), T, p)  # aligned → order 2S
+ρ = spectralRadiusOfMoment(mkprob(τfun, B; β = βn), T, p)  # varying → floor S+1
 ```
+
+Only multiple delays or Wiener channels fall back to the classical path.
 
 ### Non-smooth coefficients can cap the order — for every method
 

@@ -25,14 +25,17 @@ automatically; a warning names the engine used unless `verbosity=0`):
     (e.g. `S=3` → order 6);
   - constant incommensurate delay: order in ``[S{+}1, 2S]``;
   - smooth, T-periodic, function-valued delay ``\\tau(t) \\ge T/p``: **order floor
-    ``S{+}1``**, observed in ``[S{+}1, 2S]`` (requires ``\\beta \\equiv 0``,
-    ``\\xi(t) = t - \\tau(t)`` uniformly increasing). Rough (Wiener-driven)
-    delayed reads carry no extra penalty — the delayed drift stays exact in
-    pre-integrated history DOFs.
+    ``S{+}1``**, observed in ``[S{+}1, 2S]`` (requires ``\\xi(t) = t - \\tau(t)``
+    uniformly increasing). Rough (Wiener-driven) delayed reads carry no extra
+    penalty — the delayed drift stays exact in pre-integrated history DOFs.
+
+Delayed **multiplicative** noise (``\\beta \\not\\equiv 0``) is supported for
+every delay class: the block additionally carries point-sample DOFs at the
+delayed reading positions, filled from the same causal kernel, so rough delayed
+*noise* reads keep the order too (aligned ``2S``, varying floor ``S{+}1``).
 
 The default and recommended method; restricted to a single delay and a single
-Wiener channel. Problems outside this scope (multiple delays/channels, or a
-varying delay with delayed multiplicative noise) automatically fall back to
+Wiener channel. Multiple delays or Wiener channels automatically fall back to
 [`ClassicalSD`](@ref)`(2)` with a warning. `GaussLegendre` is an alias.
 """
 struct Collocation <: MomentMethod
@@ -79,27 +82,14 @@ function _classical_result(prob::LDDEProblem, period::Real, n_steps::Integer, q:
 end
 
 # Collocation applicability: returns `nothing` when the collocation engines can
-# handle `prob` at this resolution, else a human-readable reason for the
-# classical fallback. The fractional-limit (vT) engine requires β ≡ 0, so any
-# non-aligned delay (function-valued OR grid-misaligned constant) combined with
-# delayed multiplicative noise must fall back.
+# handle `prob`, else a human-readable reason for the classical fallback. Delayed
+# multiplicative noise (β ≢ 0) with a time-varying or grid-misaligned delay is
+# now handled by the fractional-limit engine (vT-full), so only multiple delays
+# or Wiener channels fall back.
 function _collocation_blocked(prob::LDDEProblem, period::Real, n_steps::Integer)
     length(prob.Bs) == 1 || return "multiple delay terms ($(length(prob.Bs)))"
     (length(prob.αs) ≤ 1 && length(prob.βs) ≤ 1 && length(prob.σs) ≤ 1) ||
         return "multiple Wiener channels"
-    βnz = !isempty(prob.βs) && any(
-        maximum(abs, Matrix{Float64}(prob.βs[1]((k + 0.5) / 64 * float(period)))) > 1e-14
-        for k in 0:63)
-    if βnz
-        τraw = prob.Bs[1].τ.τ
-        if !(τraw isa Real)
-            return "a function-valued delay combined with delayed multiplicative noise (β ≢ 0)"
-        elseif _aligned_r(float(τraw), float(period), n_steps) == 0
-            return "a grid-misaligned constant delay combined with delayed multiplicative " *
-                   "noise (β ≢ 0; choose n_steps with τ·n_steps/T integer to use the " *
-                   "aligned collocation engine)"
-        end
-    end
     nothing
 end
 
