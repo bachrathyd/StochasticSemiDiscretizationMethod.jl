@@ -275,13 +275,66 @@ function tests()
             mkprob(τfun), T, 4; S=2, verbosity=0)           # τ(t) < Δt
         @test_throws ErrorException spectralRadiusOfMapping_collocation(
             mkprob(t -> 0.5 + 0.2sin(2π*t)), T, 16; S=2, verbosity=0)  # τ′ > 0.9
-        # multiple Wiener channels still fall back to classical
+        # MULTIPLE INDEPENDENT WIENER CHANNELS — handled directly by the vT engine
+        # (the per-channel α/β/σ sum independently in the Itô isometry, no fallback).
+        # A physical channel split by 1/√2 into two INDEPENDENT copies must reproduce
+        # the single-channel value bit-identically (variances add quadratically):
+        #   Σ_c (α/√2)·(·)·(α/√2)ᵀ × 2 channels ≡ α·(·)·αᵀ.
+        s2 = 1/sqrt(2)
+        αh(t) = s2 .* αfun(t); βh(t) = s2 .* βsm(t)
+        mkβ_split = LDDEProblem(ProportionalMX(Afun), [DelayMX(τfun, Bpos)],
+            [stCoeffMX(1, ProportionalMX(αh)), stCoeffMX(2, ProportionalMX(αh))],
+            [stCoeffMX(1, DelayMX(τfun, βh)), stCoeffMX(2, DelayMX(τfun, βh))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3*s2])),
+                          stAdditive(2, Additive(@SVector [0.0, 0.3*s2]))])
+        ρ_1ch = spectralRadiusOfMoment(mkβ(τfun, βsm), T, 48; method=Collocation(3), verbosity=0)
+        ρ_2ch = spectralRadiusOfMoment(mkβ_split, T, 48; method=Collocation(3), verbosity=0)
+        @test isapprox(ρ_1ch, ρ_2ch; rtol=1e-8)              # split ≡ single (exact operator)
+        v_1ch = stationaryVariance(mkβ(τfun, βsm), T, 48; method=Collocation(3), verbosity=0)
+        v_2ch = stationaryVariance(mkβ_split, T, 48; method=Collocation(3), verbosity=0)
+        @test isapprox(v_1ch, v_2ch; rtol=1e-8)
+        # distinct-role channels (ch1 multiplicative, ch2 additive) run and cross-check
+        # loosely against the classical multi-channel path (physical-correctness sanity)
         βmc = LDDEProblem(ProportionalMX(Afun), [DelayMX(τfun, Bpos)],
             [stCoeffMX(1, ProportionalMX(αfun))], [stCoeffMX(1, DelayMX(τfun, βsm))],
             Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3])),
                           stAdditive(2, Additive(@SVector [0.0, 0.2]))])
         ρ_mc = spectralRadiusOfMoment(βmc, T, 200; method=Collocation(3), verbosity=0)
         @test isapprox(ρ_mc, spectralRadiusOfMoment(βmc, T, 200; method=ClassicalSD(2));
+                       rtol=3e-2)
+
+        # wrapper hygiene (reviewer round 2): (i) two present-noise terms on ONE
+        # channel SUM — 2×[0.15] ≡ 1×[0.30] (both the constant `Prob` and the
+        # function-valued ProbT paths); (ii) a β whose delay is absent from the
+        # drift set ERRORS; (iii) a β at a τ shared by two B_j is counted ONCE.
+        mkαf(s) = ProportionalMX(t -> @SMatrix [0.0 0.0; s 0.0])
+        mk1(αts, τ) = LDDEProblem(ProportionalMX(Afun), [DelayMX(τ, Bpos)],
+            αts, [stCoeffMX(1, DelayMX(τ, t -> z2))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        for τ in (0.5, τfun)     # Prob (constant) and ProbT (function) paths
+            a15 = mkαf(0.15)
+            ρ2 = spectralRadiusOfMoment(mk1([stCoeffMX(1, a15), stCoeffMX(1, a15)], τ),
+                                        T, 32; method=Collocation(3), verbosity=0)
+            ρ1 = spectralRadiusOfMoment(mk1([stCoeffMX(1, mkαf(0.30))], τ),
+                                        T, 32; method=Collocation(3), verbosity=0)
+            @test isapprox(ρ1, ρ2; rtol=1e-10)
+        end
+        badβ = LDDEProblem(ProportionalMX(Afun), [DelayMX(0.5, Bpos)],
+            [stCoeffMX(1, ProportionalMX(αfun))],
+            [stCoeffMX(1, DelayMX(0.7, βsm))],       # τ=0.7 ∉ drift delays {0.5}
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        @test_throws ErrorException spectralRadiusOfMoment(badβ, T, 32;
+                                                           method=Collocation(3), verbosity=0)
+        mkBf(s) = t -> @SMatrix [0.0 0.0; s 0.0]
+        shared = LDDEProblem(ProportionalMX(Afun),
+            [DelayMX(τfun, mkBf(0.12)), DelayMX(τfun, mkBf(0.08))],
+            [stCoeffMX(1, ProportionalMX(αfun))], [stCoeffMX(1, DelayMX(τfun, βsm))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        merged = LDDEProblem(ProportionalMX(Afun), [DelayMX(τfun, mkBf(0.20))],
+            [stCoeffMX(1, ProportionalMX(αfun))], [stCoeffMX(1, DelayMX(τfun, βsm))],
+            Additive(2), [stAdditive(1, Additive(@SVector [0.0, 0.3]))])
+        @test isapprox(spectralRadiusOfMoment(shared, T, 32; method=Collocation(3), verbosity=0),
+                       spectralRadiusOfMoment(merged, T, 32; method=Collocation(3), verbosity=0);
                        rtol=1e-9)
 
         # (e) HARD-REGIME ANCHORS (reviewer round 1)

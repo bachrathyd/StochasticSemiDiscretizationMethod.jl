@@ -1267,28 +1267,39 @@ end
 # Requires: τ(t) ≥ h, ξ′ ≥ 0.1, τ T-periodic, single delay, single Wiener channel.
 # =============================================================================
 
-# g delays: τfs[j], Bs[j], βs[j] are per-delay; A/α/σ are shared. The single-delay
-# convenience constructor wraps scalars into length-1 vectors (g=1 is bit-identical
-# to the old engine).
+# g delays (τfs[j], Bs[j]) and K independent Wiener channels: αs[k] (present),
+# βs[k][j] (delayed, per channel & delay), σs[k] (additive). Independent channels
+# just SUM in the Itô-isometry injection. Convenience constructors wrap the
+# single-channel / single-delay forms (backward compatible, bit-identical).
 struct ProbT
     d::Int; T::Float64
     τfs::Vector{Function}                 # per-delay t ↦ τ_j(t)  (smooth, T-periodic, ≥ h)
     τmins::Vector{Float64}; τmaxs::Vector{Float64}   # per-delay grid-sampled bounds
-    A::Function; Bs::Vector{Function}; α::Function; βs::Vector{Function}
-    σ::Function
+    A::Function; Bs::Vector{Function}
+    αs::Vector{Function}                  # [channel] present-state multiplicative noise
+    βs::Vector{Vector{Function}}          # [channel][delay] delayed multiplicative noise
+    σs::Vector{Function}                  # [channel] additive noise
 end
-# single-delay constructors (backward compatible)
-ProbT(d,T,τf::Function,τmin::Real,τmax::Real,A,B::Function,α,β::Function,σ) =
-    ProbT(d, T, Function[τf], Float64[τmin], Float64[τmax], A, Function[B], α, Function[β], σ)
-ProbT(d,T,τf::Function,τmin::Real,τmax::Real,A,B::Function,α,β::Function) =
+# single-channel, g delays  (α, σ shared; βs per-delay)
+ProbT(d,T,τfs::Vector,τmins::Vector,τmaxs::Vector,A,Bs::Vector,α::Function,
+      βs::Vector{<:Function},σ::Function) =
+    ProbT(d, T, Vector{Function}(τfs), Vector{Float64}(τmins), Vector{Float64}(τmaxs),
+          A, Vector{Function}(Bs), Function[α], Vector{Function}[Vector{Function}(βs)],
+          Function[σ])
+# single-delay, single-channel
+ProbT(d,T,τf::Function,τmin::Real,τmax::Real,A,B::Function,α::Function,β::Function,σ) =
+    ProbT(d, T, Function[τf], Float64[τmin], Float64[τmax], A, Function[B],
+          Function[α], Vector{Function}[Function[β]], Function[σ])
+ProbT(d,T,τf::Function,τmin::Real,τmax::Real,A,B::Function,α::Function,β::Function) =
     ProbT(d, T, τf, τmin, τmax, A, B, α, β, t->zeros(d,1))
 
 _ndelays(pb::ProbT) = length(pb.τfs)
+_nchan(pb::ProbT) = length(pb.αs)
 
-# β_j ≡ 0 test for delay j over a fine sample of the period
+# β_j ≡ 0 test for delay j across ALL channels
 function _no_delay_noise(pb::ProbT, j::Integer; nt=64)
-    for k in 0:nt-1
-        maximum(abs, pb.βs[j]((k+0.5)/nt * pb.T)) > 1e-14 && return false
+    for k in 0:nt-1, ch in 1:_nchan(pb)
+        maximum(abs, pb.βs[ch][j]((k+0.5)/nt * pb.T)) > 1e-14 && return false
     end
     true
 end
@@ -1320,9 +1331,10 @@ struct StepVT
     Pblock::Matrix{Float64}        # BSIZE×W new-block rows
                                    #   [x_e; G^(1)..G^(g); D^(1)..D^(g)]
     Yrows::Matrix{Float64}         # Sd×W stage rows (computed, NOT persisted)
-    As::Vector{Matrix{Float64}}; αs::Vector{Matrix{Float64}}
-    βss::Vector{Vector{Matrix{Float64}}}   # [delay][stage] delayed mult. noise
-    σs::Vector{Matrix{Float64}}
+    As::Vector{Matrix{Float64}}
+    αss::Vector{Vector{Matrix{Float64}}}   # [channel][stage] present-noise
+    βsss::Vector{Vector{Vector{Matrix{Float64}}}}  # [channel][delay][stage] delayed noise
+    σss::Vector{Vector{Matrix{Float64}}}   # [channel][stage] additive
     Dsels::Vector{Vector{Matrix{Float64}}} # [delay][stage] selector x(ξ_j(t_n+c_k h))
     Bts::Vector{Function}          # [delay] memoized θ ↦ B̃_j(t_n + θh)  (d×d)
     θbrks::Vector{Vector{Float64}} # [delay] G breakpoints (θ units; pads = 1.0)
@@ -1334,7 +1346,7 @@ struct StepVT
     a::Matrix{Float64}; b::Vector{Float64}; c::Vector{Float64}
     lcoef::Vector{Vector{Float64}}
     φstage::Vector{Matrix{Float64}}
-    h::Float64; d::Int; S::Int; W::Int; BSIZE::Int; r::Int; g::Int; anyD::Bool
+    h::Float64; d::Int; S::Int; W::Int; BSIZE::Int; r::Int; g::Int; K::Int; anyD::Bool
 end
 
 # One reading piece: window slot `lag` (0-based), G index `idx` (0 = block
@@ -1363,10 +1375,11 @@ function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf, plans::Vector{_DelayPlan})
     goffs=Vector{Int}(undef,g); doffs=Vector{Int}(undef,g)
     acc0=1; for j in 1:g; goffs[j]=acc0; acc0+=NJs[j]; end
     for j in 1:g; doffs[j]=acc0; acc0+=NDs[j]; end
+    K=_nchan(pb)
     As=[Matrix(pb.A(t_n+c[i]*h)) for i in 1:S]
-    αs=[Matrix(pb.α(t_n+c[i]*h)) for i in 1:S]
-    σs=[Matrix(pb.σ(t_n+c[i]*h)) for i in 1:S]
-    βss=[[Matrix(pb.βs[j](t_n+c[i]*h)) for i in 1:S] for j in 1:g]
+    αss=[[Matrix(pb.αs[ch](t_n+c[i]*h)) for i in 1:S] for ch in 1:K]        # [ch][stage]
+    σss=[[Matrix(pb.σs[ch](t_n+c[i]*h)) for i in 1:S] for ch in 1:K]
+    βsss=[[[Matrix(pb.βs[ch][j](t_n+c[i]*h)) for i in 1:S] for j in 1:g] for ch in 1:K]
     # per-delay B̃_j weight on THIS block (memoized per θ)
     Bts=Function[]
     for j in 1:g
@@ -1462,9 +1475,9 @@ function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf, plans::Vector{_DelayPlan})
     RHSΦ=zeros(S*d, d); for i in 1:S; RHSΦ[(i-1)*d+1:i*d, :] .= Id; end
     Φstack=Minv*RHSΦ
     φstage=[Φstack[(m-1)*d+1:m*d, :] for m in 1:S]
-    return StepVT(Pblock, Yrows, As, αs, βss, σs, Dsels, Bts, θbrks, nbrks,
+    return StepVT(Pblock, Yrows, As, αss, βsss, σss, Dsels, Bts, θbrks, nbrks,
                   dθbrks, nDs, goffs, doffs, NJs, NDs, a, b, c, lcoef, φstage,
-                  h, d, S, W, BSIZE, r_buf, g, anyD)
+                  h, d, S, W, BSIZE, r_buf, g, K, anyD)
 end
 
 # helpers mirroring the v9 versions but taking a StepVT
@@ -1473,10 +1486,12 @@ _φ_atT(st::StepVT, θ) = begin
     for j in 1:st.S; Φ .+= (st.h*_lint(st.lcoef[j], θ)).*(st.As[j]*st.φstage[j]); end
     Φ
 end
+_ασΣα(st::StepVT, j, Σ) = (o=zeros(st.d,st.d);
+    for ch in 1:st.K; o .+= st.αss[ch][j]*Σ*st.αss[ch][j]'; end; o)
 _Σn_atT(st::StepVT, θ, Σs, Egg) = begin
     out=zeros(st.d,st.d)
     for j in 1:st.S
-        rhs = st.As[j]*Σs[j] .+ Σs[j]*st.As[j]' .+ st.αs[j]*Σs[j]*st.αs[j]' .+ Egg[j]
+        rhs = st.As[j]*Σs[j] .+ Σs[j]*st.As[j]' .+ _ασΣα(st,j,Σs[j]) .+ Egg[j]
         out .+= (st.h*_lint(st.lcoef[j], θ)).*rhs
     end
     out
@@ -1496,18 +1511,24 @@ function noise_block_vT(st::StepVT, C)
     Egg=Vector{Matrix{Float64}}(undef,S)
     for k in 1:S
         Yk=@view st.Yrows[(k-1)*d+1:k*d, :]
-        Mxx=Yk*C*Yk'
-        e = st.αs[k]*Mxx*st.αs[k]' .+ st.σs[k]*st.σs[k]'
-        if st.anyD
-            Mxd=[Yk*C*st.Dsels[j][k]' for j in 1:g]
-            for j in 1:g
-                st.NDs[j]==0 && continue
-                e = e .+ st.αs[k]*Mxd[j]*st.βss[j][k]' .+ st.βss[j][k]*Mxd[j]'*st.αs[k]'
-            end
-            for j in 1:g, l in 1:g
-                (st.NDs[j]==0 || st.NDs[l]==0) && continue
-                Mdd=st.Dsels[j][k]*C*st.Dsels[l][k]'
-                e = e .+ st.βss[j][k]*Mdd*st.βss[l][k]'
+        Mxx=Yk*C*Yk'                                       # channel-independent
+        Mxd = st.anyD ? [Yk*C*st.Dsels[j][k]' for j in 1:g] : Matrix{Float64}[]
+        Mdd = st.anyD ? [[st.Dsels[jj][k]*C*st.Dsels[ll][k]' for ll in 1:g] for jj in 1:g] :
+                        Vector{Matrix{Float64}}[]
+        e = zeros(d,d)
+        for ch in 1:st.K                                   # independent channels SUM
+            α=st.αss[ch][k]; σ=st.σss[ch][k]
+            e .+= α*Mxx*α' .+ σ*σ'
+            if st.anyD
+                for j in 1:g
+                    st.NDs[j]==0 && continue
+                    β=st.βsss[ch][j][k]
+                    e .+= α*Mxd[j]*β' .+ β*Mxd[j]'*α'
+                end
+                for j in 1:g, l in 1:g
+                    (st.NDs[j]==0 || st.NDs[l]==0) && continue
+                    e .+= st.βsss[ch][j][k]*Mdd[j][l]*st.βsss[ch][l][k]'
+                end
             end
         end
         Egg[k]=(e.+e')./2
@@ -1515,7 +1536,8 @@ function noise_block_vT(st::StepVT, C)
     d2=d*d
     Mop=Matrix{Float64}(I,S*d2,S*d2)
     for i in 1:S, j in 1:S
-        Lj=kron(Id,st.As[j]) .+ kron(st.As[j],Id) .+ kron(st.αs[j],st.αs[j])
+        Lj=kron(Id,st.As[j]) .+ kron(st.As[j],Id)
+        for ch in 1:st.K; Lj .+= kron(st.αss[ch][j],st.αss[ch][j]); end
         Mop[(i-1)*d2+1:i*d2, (j-1)*d2+1:j*d2] .-= h*a[i,j].*Lj
     end
     rhs=zeros(S*d2)
@@ -1524,7 +1546,7 @@ function noise_block_vT(st::StepVT, C)
     Σs=[reshape(vΣ[(k-1)*d2+1:k*d2],d,d) for k in 1:S]
     endm=zeros(d,d)
     for j in 1:S
-        endm .+= h*b[j].*(st.As[j]*Σs[j] .+ Σs[j]*st.As[j]' .+ st.αs[j]*Σs[j]*st.αs[j]' .+ Egg[j])
+        endm .+= h*b[j].*(st.As[j]*Σs[j] .+ Σs[j]*st.As[j]' .+ _ασΣα(st,j,Σs[j]) .+ Egg[j])
     end
     cache=Dict{Float64,Matrix{Float64}}(); φc(θ)=get!(()->_φ_atT(st,θ),cache,θ)
     ΔB=zeros(BSIZE,BSIZE)
@@ -1603,8 +1625,11 @@ end
 struct NoiseOpVT
     Mop::Matrix{Float64}
     a::Matrix{Float64}
-    As::Vector{Matrix{Float64}}; αs::Vector{Matrix{Float64}}; σs::Vector{Matrix{Float64}}
-    βss::Vector{Vector{Matrix{Float64}}}          # [delay][stage]
+    As::Vector{Matrix{Float64}}
+    αss::Vector{Vector{Matrix{Float64}}}          # [channel][stage]
+    σss::Vector{Vector{Matrix{Float64}}}          # [channel][stage]
+    βsss::Vector{Vector{Vector{Matrix{Float64}}}} # [channel][delay][stage]
+    K::Int                                        # number of Wiener channels
     nzc::Vector{Int}                              # gather columns (Y ∪ all Dsel)
     Ynz::Matrix{Float64}                          # Sd × nnz
     Dnz::Vector{Vector{Matrix{Float64}}}          # [delay][stage] d × nnz
@@ -1618,7 +1643,8 @@ function _build_noiseop_vT(st::StepVT)
     Id=Matrix{Float64}(I,d,d)
     Mop=Matrix{Float64}(I,S*d2,S*d2)
     for i in 1:S, j in 1:S
-        Lj=kron(Id,st.As[j]) .+ kron(st.As[j],Id) .+ kron(st.αs[j],st.αs[j])
+        Lj=kron(Id,st.As[j]) .+ kron(st.As[j],Id)
+        for ch in 1:st.K; Lj .+= kron(st.αss[ch][j],st.αss[ch][j]); end
         Mop[(i-1)*d2+1:i*d2, (j-1)*d2+1:j*d2] .-= h*a[i,j].*Lj
     end
     φcache=Dict{Float64,Matrix{Float64}}();  φf(θ)=get!(()->_φ_atT(st,θ),φcache,θ)
@@ -1709,7 +1735,7 @@ function _build_noiseop_vT(st::StepVT)
     nzc=sort!(collect(nzset))
     Ynz=st.Yrows[:, nzc]
     Dnz=[[st.Dsels[j][k][:, nzc] for k in 1:S] for j in 1:g]
-    NoiseOpVT(Mop, a, st.As, st.αs, st.σs, st.βss, nzc, Ynz, Dnz,
+    NoiseOpVT(Mop, a, st.As, st.αss, st.σss, st.βsss, st.K, nzc, Ynz, Dnz,
               h, d, S, g, BSIZE, brs, bcs, Mten)
 end
 
@@ -1734,19 +1760,31 @@ function _noise_apply_add_nz_vT!(target, op::NoiseOpVT, Cnz)
     for k in 1:S
         Yk=@view op.Ynz[(k-1)*d+1:k*d, :]
         Mxx=Yk*Cnz*Yk'
-        e=op.αs[k]*Mxx*op.αs[k]' .+ op.σs[k]*op.σs[k]'
+        # channel-independent cross/self kernels (read window C only)
+        Mxd=Vector{Matrix{Float64}}(undef,g); Mdd=Matrix{Matrix{Float64}}(undef,g,g)
         for j in 1:g
             isempty(op.Dnz[j]) && continue
             Dj=op.Dnz[j][k]; any(!iszero,Dj) || continue
-            Mxd=Yk*Cnz*Dj'
-            e = e .+ op.αs[k]*Mxd*op.βss[j][k]' .+ op.βss[j][k]*Mxd'*op.αs[k]'
+            Mxd[j]=Yk*Cnz*Dj'
         end
         for j in 1:g, l in 1:g
             (isempty(op.Dnz[j]) || isempty(op.Dnz[l])) && continue
             Dj=op.Dnz[j][k]; Dl=op.Dnz[l][k]
             (any(!iszero,Dj) && any(!iszero,Dl)) || continue
-            Mdd=Dj*Cnz*Dl'
-            e = e .+ op.βss[j][k]*Mdd*op.βss[l][k]'
+            Mdd[j,l]=Dj*Cnz*Dl'
+        end
+        e=zeros(d,d)
+        for ch in 1:op.K
+            αk=op.αss[ch][k]; σk=op.σss[ch][k]; βk=op.βsss[ch]
+            e = e .+ αk*Mxx*αk' .+ σk*σk'
+            for j in 1:g
+                isassigned(Mxd,j) || continue
+                e = e .+ αk*Mxd[j]*βk[j][k]' .+ βk[j][k]*Mxd[j]'*αk'
+            end
+            for j in 1:g, l in 1:g
+                isassigned(Mdd,j,l) || continue
+                e = e .+ βk[j][k]*Mdd[j,l]*βk[l][k]'
+            end
         end
         Egg[k]=(e.+e')./2
     end
@@ -1756,7 +1794,8 @@ function _noise_apply_add_nz_vT!(target, op::NoiseOpVT, Cnz)
     Rm=[Vector{Float64}(undef,d2) for _ in 1:S]
     for m in 1:S
         Σm=reshape(@view(vΣ[(m-1)*d2+1:m*d2]), d, d)
-        R=op.As[m]*Σm .+ Σm*op.As[m]' .+ op.αs[m]*Σm*op.αs[m]' .+ Egg[m]
+        R=op.As[m]*Σm .+ Σm*op.As[m]' .+ Egg[m]
+        for ch in 1:op.K; R = R .+ op.αss[ch][m]*Σm*op.αss[ch][m]'; end
         Rm[m].=vec(R)
     end
     vb=Vector{Float64}(undef,d2)

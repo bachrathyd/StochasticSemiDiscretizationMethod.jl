@@ -36,10 +36,11 @@ delayed reading positions, filled from the same causal kernel, so rough delayed
 **Multiple delays** ``\\sum_j \\mathbf{B}_j\\,\\mathbf{x}(t-\\tau_j(t))`` are also
 handled — each delay carries its own integrated-history DOFs and shares the
 point-sample states; the ``\\beta_j`` pair with the ``\\mathbf{B}_j`` by index.
+**Multiple independent Wiener channels** are supported as well — the per-channel
+present/delayed/additive coefficients ``(\\alpha^{(c)},\\beta^{(c)},\\sigma^{(c)})``
+sum independently in the Itô-isometry noise injection.
 
-The default and recommended method; restricted to a **single Wiener channel**.
-Multiple independent Wiener channels automatically fall back to
-[`ClassicalSD`](@ref)`(2)` with a warning. `GaussLegendre` is an alias.
+The default and recommended method. `GaussLegendre` is an alias.
 """
 struct Collocation <: MomentMethod
     S::Int
@@ -86,14 +87,10 @@ end
 
 # Collocation applicability: returns `nothing` when the collocation engines can
 # handle `prob`, else a human-readable reason for the classical fallback. Multiple
-# delays and delayed multiplicative noise are handled by the vT engine; only
-# multiple Wiener channels (independent noise sources) still fall back.
+# delays, delayed multiplicative noise, and multiple independent Wiener channels
+# are all handled by the vT engine — nothing currently forces a classical fallback
+# (unsupported delay geometries, e.g. τ < Δt, surface as build-time errors).
 function _collocation_blocked(prob::LDDEProblem, period::Real, n_steps::Integer)
-    nids = Int[]
-    for x in prob.αs; push!(nids, x.nID); end
-    for x in prob.βs; push!(nids, x.nID); end
-    for x in prob.σs; push!(nids, x.nID); end
-    length(unique(nids)) ≤ 1 || return "multiple Wiener channels ($(sort(unique(nids))))"
     nothing
 end
 
