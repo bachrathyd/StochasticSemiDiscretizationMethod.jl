@@ -1316,8 +1316,10 @@ _dtau(τf, t; δ=6.0e-6) = (τf(t+δ) - τf(t-δ)) / (2δ)
 # is the hot path of the noise-operator precompute (evaluated at every quadrature
 # node of every stage), so its ~5× speedup over the former 80-iteration bisection
 # dominates the engine build time. Machine-precision identical to the bisection.
-function _xi_inv(pb::ProbT, j::Integer, u)
-    τf=pb.τfs[j]; τmin=pb.τmins[j]; τmax=pb.τmaxs[j]
+# `τf` is taken as an argument (not read from the abstractly-typed pb.τfs[j] inside)
+# so Julia specializes this on the concrete τ type — that removes the per-call
+# boxing that otherwise dominates the build allocation.
+function _xi_inv_f(τf::F, τmin::Float64, τmax::Float64, u) where F
     pad = 0.01*max(τmax - τmin, 1e-8*τmax)
     lo = u + τmin - pad; hi = u + τmax + pad
     (lo - τf(lo) - u <= 0.0 && hi - τf(hi) - u >= 0.0) ||
@@ -1335,6 +1337,18 @@ function _xi_inv(pb::ProbT, j::Integer, u)
         w = wn
     end
     w
+end
+_xi_inv(pb::ProbT, j::Integer, u) = _xi_inv_f(pb.τfs[j], pb.τmins[j], pb.τmaxs[j], u)
+
+# type-specialized builder for the memoized global weight B̃_j(t_n+θh)=B_j(ξ⁻¹(u))/ξ′.
+# Capturing τf and Bf CONCRETELY (via the `where` barrier) keeps every hot-loop
+# quadrature-node evaluation allocation-free — the single largest build speedup.
+function _make_Bt(τf::TF, Bf::BF, τmin::Float64, τmax::Float64, t_n, h) where {TF,BF}
+    cache=Dict{Float64,Matrix{Float64}}()
+    θ -> get!(cache, θ) do
+        u=t_n+θ*h; w=_xi_inv_f(τf, τmin, τmax, u); ξp=1.0-_dtau(τf, w)
+        Matrix(Bf(w)) ./ ξp
+    end
 end
 
 struct StepVT
@@ -1390,15 +1404,8 @@ function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf, plans::Vector{_DelayPlan})
     αss=[[Matrix(pb.αs[ch](t_n+c[i]*h)) for i in 1:S] for ch in 1:K]        # [ch][stage]
     σss=[[Matrix(pb.σs[ch](t_n+c[i]*h)) for i in 1:S] for ch in 1:K]
     βsss=[[[Matrix(pb.βs[ch][j](t_n+c[i]*h)) for i in 1:S] for j in 1:g] for ch in 1:K]
-    # per-delay B̃_j weight on THIS block (memoized per θ)
-    Bts=Function[]
-    for j in 1:g
-        cache=Dict{Float64,Matrix{Float64}}()
-        push!(Bts, θ -> get!(cache, θ) do
-            u=t_n+θ*h; w=_xi_inv(pb, j, u); ξp=1.0-_dtau(pb.τfs[j], w)
-            Matrix(pb.Bs[j](w)) ./ ξp
-        end)
-    end
+    # per-delay B̃_j weight on THIS block (memoized per θ; concrete-typed builder)
+    Bts=Function[_make_Bt(pb.τfs[j], pb.Bs[j], pb.τmins[j], pb.τmaxs[j], t_n, h) for j in 1:g]
     Id=Matrix{Float64}(I,d,d)
     lcoef=_lagr_coefs(c)
     xn_rng = 1:d
