@@ -19,8 +19,12 @@ const PAPER_IMG=joinpath(@__DIR__,"..","journal_paper","images")
 # the classical scheme is genuinely FIRST order in the second moment — the regime
 # where the high-order collocation earns its keep (additive-only problems let the
 # classical scheme ride its deterministic order 2 and win, see the paper).
-Ω0=0.87; RVA=0.1; RVF=0.1; ζ=0.05; w=0.4; σ=0.1; σc=0.25
-T=2π/RVF
+# const ⇒ the coefficient closures below are type-stable; the collocation build
+# evaluates them at every Gauss node of every stage, so non-const globals here
+# would box every call and dominate the (parallelised) build time. Run this script
+# with `julia -t auto` so the embarrassingly-parallel engine build uses all cores.
+const Ω0=0.87; const RVA=0.1; const RVF=0.1; const ζ=0.05; const w=0.4; const σ=0.1; const σc=0.25
+const T=2π/RVF
 τf(t)=(2π)/(Ω0*(1.0+RVA*sin(RVF*t)))
 Af(t)=@SMatrix [0.0 1.0; -(1.0+w) -2ζ]
 Bf(t)=@SMatrix [0.0 0.0; w 0.0]
@@ -67,7 +71,7 @@ function render()
     plt=plot(size=(760,560),dpi=300,framestyle=:box,legend=:topright,
              xscale=:log10,yscale=:log10,xlabel="CPU time  [s]",
              ylabel="error in ρ(H)",guidefontsize=12,tickfontsize=10,
-             title="SSV turning τ(t), β≢0: accuracy per second",
+             title="SSV turning τ(t), β≢0: accuracy per second (GL build ∥ $(Threads.nthreads()) thr)",
              left_margin=5Plots.mm,bottom_margin=5Plots.mm)
     series=[("classical","classical SD (q=2)",:black,:circle),
             ("S1","GL collocation S=1",:seagreen,:utriangle),
