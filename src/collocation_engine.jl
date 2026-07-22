@@ -1583,12 +1583,200 @@ function noise_block_vT(st::StepVT, C)
     return ΔB
 end
 
+# ---------------------------------------------------------------------------
+# Precomputed per-step noise operator for vT (fast path, mirrors NoiseOpV9).
+# noise_block_vT is AFFINE in C: C enters ONLY through the stage contractions
+#   Egg_k = α(Y C Yᵀ)α + Σ_j[α(Y C D_jᵀ)β_j + h.c.] + Σ_{j,l} β_j(D_j C D_lᵀ)β_l + σσ.
+# Everything downstream (Σ-solve, causal-kernel quadrature over B̃_j / φ) is a
+# FIXED linear map: vec(ΔB[block]) = Σ_m Mten[block][m]·vec(R_m), with
+#   R_m = As_m Σs_m + Σs_m As_mᵀ + αs_m Σs_m αs_mᵀ + Egg_m ,  Σs = Mop⁻¹ rhs(Egg).
+# Precompute the response tensors once per step; each matvec is then a tiny Egg,
+# one S·d² solve, and a handful of d²×d² mat-vecs — numerically identical to
+# noise_block_vT (~1e-13), ~100× cheaper.
+struct NoiseOpVT
+    Mop::Matrix{Float64}
+    a::Matrix{Float64}
+    As::Vector{Matrix{Float64}}; αs::Vector{Matrix{Float64}}; σs::Vector{Matrix{Float64}}
+    βss::Vector{Vector{Matrix{Float64}}}          # [delay][stage]
+    nzc::Vector{Int}                              # gather columns (Y ∪ all Dsel)
+    Ynz::Matrix{Float64}                          # Sd × nnz
+    Dnz::Vector{Vector{Matrix{Float64}}}          # [delay][stage] d × nnz
+    h::Float64; d::Int; S::Int; g::Int; BSIZE::Int
+    brs::Vector{UnitRange{Int}}; bcs::Vector{UnitRange{Int}}
+    Mten::Vector{Vector{Matrix{Float64}}}
+end
+
+function _build_noiseop_vT(st::StepVT)
+    d=st.d; S=st.S; h=st.h; a=st.a; b=st.b; BSIZE=st.BSIZE; g=st.g; d2=d*d
+    Id=Matrix{Float64}(I,d,d)
+    Mop=Matrix{Float64}(I,S*d2,S*d2)
+    for i in 1:S, j in 1:S
+        Lj=kron(Id,st.As[j]) .+ kron(st.As[j],Id) .+ kron(st.αs[j],st.αs[j])
+        Mop[(i-1)*d2+1:i*d2, (j-1)*d2+1:j*d2] .-= h*a[i,j].*Lj
+    end
+    φcache=Dict{Float64,Matrix{Float64}}();  φf(θ)=get!(()->_φ_atT(st,θ),φcache,θ)
+    iφcache=Dict{Float64,Matrix{Float64}}(); iφf(θ)=get!(()->inv(φf(θ)),iφcache,θ)
+    T1=Matrix{Float64}(undef,d,d); T2=Matrix{Float64}(undef,d,d)
+    brs=UnitRange{Int}[]; bcs=UnitRange{Int}[]; Mten=Vector{Matrix{Float64}}[]
+    newgroup!(br,bc)=(push!(brs,br); push!(bcs,bc);
+                      push!(Mten,[zeros(d2,d2) for _ in 1:S]); length(brs))
+    coefΣ(θ,m)=h*_lint(st.lcoef[m], θ)
+    Grng(j,k)=((st.goffs[j]+k-1)*d+1 : (st.goffs[j]+k)*d)
+    Drng(j,k)=((st.doffs[j]+k-1)*d+1 : (st.doffs[j]+k)*d)
+    Gs=[(st.θbrks[j][k], st.Bts[j], Grng(j,k)) for j in 1:g for k in 1:st.NJs[j]]
+    Ds=[(st.θbrks[j][k], Drng(j,k)) for j in 1:g if st.NDs[j]>0 for k in 1:st.NJs[j]]
+    # endpoint block: endm = Σ_m (h b_m) R_m
+    grp=newgroup!(1:d, 1:d); for m in 1:S; _kron_acc!(Mten[grp][m], h*b[m], Id, Id); end
+    # G–x_e = ∫_0^{θG} B̃(u) Σn(u) (φ(1)/φ(u))ᵀ du
+    for (θG, Bt, rg) in Gs
+        θG <= 1e-14 && (newgroup!(rg,1:d); continue)
+        grp=newgroup!(rg, 1:d)
+        for (gx,gw) in zip(_G8.x,_G8.w)
+            u=θG*gx; L=Bt(u); mul!(T1, φf(1.0), iφf(u))
+            for m in 1:S; _kron_acc_t!(Mten[grp][m], h*θG*gw*coefΣ(u,m), T1, L); end
+        end
+    end
+    # G^(j)–G^(l) = ∬ B̃_j(u) Δ(u,v) B̃_l(v)ᵀ  (split inner at v)
+    for ia in eachindex(Gs), ib in eachindex(Gs)
+        ib < ia && continue
+        (θa, Bta, ra)=Gs[ia]; (θb, Btb, rb)=Gs[ib]; grp=newgroup!(ra, rb)
+        (θa<=1e-14 || θb<=1e-14) && continue
+        for (gx,gw) in zip(_G8.x,_G8.w)
+            ϑ=θb*gx; wϑ=θb*gw; Bv=Btb(ϑ)
+            segs = ϑ<θa ? ((0.0,ϑ),(ϑ,θa)) : ((0.0,θa),)
+            for (lo,hi) in segs
+                hi<=lo && continue
+                for (gx2,gw2) in zip(_G8.x,_G8.w)
+                    θ=lo+(hi-lo)*gx2; w=h*h*wϑ*(hi-lo)*gw2
+                    if θ<=ϑ
+                        L=Bta(θ); mul!(T1, φf(ϑ), iφf(θ)); mul!(T2, Bv, T1)
+                        for m in 1:S; _kron_acc_t!(Mten[grp][m], w*coefΣ(θ,m), T2, L); end
+                    else
+                        mul!(T1, φf(θ), iφf(ϑ)); mul!(T2, Bta(θ), T1)
+                        for m in 1:S; _kron_acc_t!(Mten[grp][m], w*coefΣ(ϑ,m), Bv, T2); end
+                    end
+                end
+            end
+        end
+    end
+    # D–x_e = Δ(θD,1) = Σn(θD)(φ(1)/φ(θD))ᵀ  (point, no integral)
+    for (θD, rd) in Ds
+        grp=newgroup!(rd, 1:d); mul!(T1, φf(1.0), iφf(θD))
+        for m in 1:S; _kron_acc_t!(Mten[grp][m], coefΣ(θD,m), T1, Id); end
+    end
+    # D–D = Δ(θi,θj)
+    for ia in eachindex(Ds), ib in eachindex(Ds)
+        ib < ia && continue
+        (θi, ri)=Ds[ia]; (θj, rj)=Ds[ib]; grp=newgroup!(ri, rj)
+        if θi<=θj; mul!(T1, φf(θj), iφf(θi))
+            for m in 1:S; _kron_acc_t!(Mten[grp][m], coefΣ(θi,m), T1, Id); end
+        else; mul!(T1, φf(θi), iφf(θj))
+            for m in 1:S; _kron_acc_t!(Mten[grp][m], coefΣ(θj,m), Id, T1); end
+        end
+    end
+    # G–D = ∫_0^{θG} B̃(u) Δ(u,θD) du  (split at θD)
+    for (θG, Bt, rg) in Gs, (θD, rd) in Ds
+        grp=newgroup!(rg, rd)
+        θG <= 1e-14 && continue
+        segs = θD<θG ? ((0.0,θD),(θD,θG)) : ((0.0,θG),)
+        for (lo,hi) in segs
+            hi<=lo && continue
+            for (gx,gw) in zip(_G8.x,_G8.w)
+                u=lo+(hi-lo)*gx; w=h*(hi-lo)*gw
+                if u<=θD
+                    L=Bt(u); mul!(T1, φf(θD), iφf(u))
+                    for m in 1:S; _kron_acc_t!(Mten[grp][m], w*coefΣ(u,m), T1, L); end
+                else
+                    mul!(T1, φf(u), iφf(θD)); mul!(T2, Bt(u), T1)
+                    for m in 1:S; _kron_acc_t!(Mten[grp][m], w*coefΣ(θD,m), Id, T2); end
+                end
+            end
+        end
+    end
+    # gather columns: nonzero cols of Yrows and every Dsel
+    nzset=Set{Int}()
+    for jj in 1:size(st.Yrows,2); any(!iszero, @view st.Yrows[:,jj]) && push!(nzset,jj); end
+    for j in 1:g, k in 1:S, jj in 1:size(st.Dsels[j][k],2)
+        any(!iszero, @view st.Dsels[j][k][:,jj]) && push!(nzset,jj)
+    end
+    nzc=sort!(collect(nzset))
+    Ynz=st.Yrows[:, nzc]
+    Dnz=[[st.Dsels[j][k][:, nzc] for k in 1:S] for j in 1:g]
+    NoiseOpVT(Mop, a, st.As, st.αs, st.σs, st.βss, nzc, Ynz, Dnz,
+              h, d, S, g, BSIZE, brs, bcs, Mten)
+end
+
+function _noise_apply_vT!(ΔB, op::NoiseOpVT, C)
+    fill!(ΔB, 0.0)
+    nnz=length(op.nzc)
+    Cnz=Matrix{Float64}(undef, nnz, nnz)
+    @inbounds for (jj,cj) in enumerate(op.nzc), (ii,ci) in enumerate(op.nzc)
+        Cnz[ii,jj]=C[ci,cj]
+    end
+    _noise_apply_add_nz_vT!(ΔB, op, Cnz)
+end
+
+function _noise_apply_add_v9_phys!(target, op::NoiseOpVT, C, phys::AbstractVector{Int}, Cnz)
+    @inbounds for jj in eachindex(phys), ii in eachindex(phys); Cnz[ii,jj]=C[phys[ii],phys[jj]]; end
+    _noise_apply_add_nz_vT!(target, op, Cnz)
+end
+
+function _noise_apply_add_nz_vT!(target, op::NoiseOpVT, Cnz)
+    d=op.d; S=op.S; g=op.g; d2=d*d
+    Egg=Vector{Matrix{Float64}}(undef,S)
+    for k in 1:S
+        Yk=@view op.Ynz[(k-1)*d+1:k*d, :]
+        Mxx=Yk*Cnz*Yk'
+        e=op.αs[k]*Mxx*op.αs[k]' .+ op.σs[k]*op.σs[k]'
+        for j in 1:g
+            isempty(op.Dnz[j]) && continue
+            Dj=op.Dnz[j][k]; any(!iszero,Dj) || continue
+            Mxd=Yk*Cnz*Dj'
+            e = e .+ op.αs[k]*Mxd*op.βss[j][k]' .+ op.βss[j][k]*Mxd'*op.αs[k]'
+        end
+        for j in 1:g, l in 1:g
+            (isempty(op.Dnz[j]) || isempty(op.Dnz[l])) && continue
+            Dj=op.Dnz[j][k]; Dl=op.Dnz[l][k]
+            (any(!iszero,Dj) && any(!iszero,Dl)) || continue
+            Mdd=Dj*Cnz*Dl'
+            e = e .+ op.βss[j][k]*Mdd*op.βss[l][k]'
+        end
+        Egg[k]=(e.+e')./2
+    end
+    rhs=zeros(S*d2)
+    for j in 1:S, k in 1:S; rhs[(j-1)*d2+1:j*d2] .+= op.h*op.a[j,k].*vec(Egg[k]); end
+    vΣ=op.Mop\rhs
+    Rm=[Vector{Float64}(undef,d2) for _ in 1:S]
+    for m in 1:S
+        Σm=reshape(@view(vΣ[(m-1)*d2+1:m*d2]), d, d)
+        R=op.As[m]*Σm .+ Σm*op.As[m]' .+ op.αs[m]*Σm*op.αs[m]' .+ Egg[m]
+        Rm[m].=vec(R)
+    end
+    vb=Vector{Float64}(undef,d2)
+    @inbounds for grp in eachindex(op.brs)
+        fill!(vb, 0.0)
+        for m in 1:S; mul!(vb, op.Mten[grp][m], Rm[m], 1.0, 1.0); end
+        br=op.brs[grp]; bc=op.bcs[grp]; k=0
+        for cc in bc, rr in br; k+=1; target[rr,cc]+=vb[k]; end
+        if br!=bc
+            k=0; for cc in bc, rr in br; k+=1; target[cc,rr]+=vb[k]; end
+        end
+    end
+    target
+end
+
 function applyH_vT(eng,C)
     Ck=copy(C)
-    for st in eng.steps
+    fast = haskey(eng,:vtops)
+    ΔBscr = fast ? Matrix{Float64}(undef, eng.BSIZE, eng.BSIZE) : zeros(0,0)
+    for (n,st) in enumerate(eng.steps)
         W=st.W; BSIZE=st.BSIZE; keep=W-BSIZE
         P=st.Pblock; PC=P*Ck
-        newdiag=PC*P' + noise_block_vT(st,Ck)
+        if fast
+            _noise_apply_vT!(ΔBscr, eng.vtops[n], Ck); newdiag=PC*P' + ΔBscr
+        else
+            newdiag=PC*P' + noise_block_vT(st,Ck)
+        end
         Cnew=similar(Ck)
         Cnew[1:BSIZE,1:BSIZE]=newdiag
         Cnew[1:BSIZE,BSIZE+1:end]=PC[:,1:keep]
@@ -1695,7 +1883,9 @@ function build_vT(pb::ProbT, S, p; force=false, want_U::Bool=false)
     dbk=[_delay_bookkeeping(pb, j, S, p, c, h, r_buf, !_no_delay_noise(pb, j)) for j in 1:g]
     steps=[step_vT(pb, a, b, c, h, (n-1)*h, r_buf, [dbk[j][n] for j in 1:g]) for n in 1:p]
     W=steps[1].W; BSIZE=steps[1].BSIZE
-    eng=(steps=steps, W=W, BSIZE=BSIZE, p=p, r=r_buf, d=pb.d, engine=:vT)
+    # precompute per-step noise operators (the Krylov hot path); applyH_vT uses them
+    vtops=[_build_noiseop_vT(st) for st in steps]
+    eng=(steps=steps, vtops=vtops, W=W, BSIZE=BSIZE, p=p, r=r_buf, d=pb.d, engine=:vT)
     if want_U
         U=Matrix{Float64}(I,W,W)
         for st in steps
