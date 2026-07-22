@@ -1325,10 +1325,12 @@ struct StepVT
     σs::Vector{Matrix{Float64}}
     Dsels::Vector{Vector{Matrix{Float64}}} # [delay][stage] selector x(ξ_j(t_n+c_k h))
     Bts::Vector{Function}          # [delay] memoized θ ↦ B̃_j(t_n + θh)  (d×d)
-    θbrks::Vector{Vector{Float64}} # [delay] breakpoints (θ units; pads = 1.0)
-    nbrks::Vector{Int}             # [delay] genuine breakpoint counts
+    θbrks::Vector{Vector{Float64}} # [delay] G breakpoints (θ units; pads = 1.0)
+    nbrks::Vector{Int}             # [delay] genuine G breakpoint counts
+    dθbrks::Vector{Vector{Float64}} # [delay] D breakpoints (noise-read targets, padded)
+    nDs::Vector{Int}               # [delay] genuine D counts (≤ ND)
     goffs::Vector{Int}; doffs::Vector{Int} # [delay] within-block col offsets (units of d)
-    NJs::Vector{Int}; NDs::Vector{Int}     # [delay] G / D counts
+    NJs::Vector{Int}; NDs::Vector{Int}     # [delay] G / D block sizes
     a::Matrix{Float64}; b::Vector{Float64}; c::Vector{Float64}
     lcoef::Vector{Vector{Float64}}
     φstage::Vector{Matrix{Float64}}
@@ -1344,8 +1346,9 @@ const _VTRead = Tuple{Int,Int,Int,Int}
 
 # A per-delay plan (breakpoints + drift readmap + noise reads for one delay).
 struct _DelayPlan
-    θbrk::Vector{Float64}; nbrk::Int
-    readmap::Vector{Vector{_VTPiece}}   # [stage 1..S, endpoint S+1]
+    θbrk::Vector{Float64}; nbrk::Int     # G breakpoints (all drift-read images)
+    dθbrk::Vector{Float64}; nD::Int      # D breakpoints (noise-read targets only), padded to ND
+    readmap::Vector{Vector{_VTPiece}}   # [stage 1..S, endpoint S+1]; noiseread bp = D-position
     noiseread::Vector{_VTRead}          # [stage 1..S]
     NJ::Int; ND::Int
 end
@@ -1353,6 +1356,7 @@ end
 function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf, plans::Vector{_DelayPlan})
     d=pb.d; S=length(c); g=length(plans)
     NJs=[pl.NJ for pl in plans]; NDs=[pl.ND for pl in plans]
+    nDs=[pl.nD for pl in plans]; dθbrks=[pl.dθbrk for pl in plans]
     NJtot=sum(NJs); NDtot=sum(NDs)
     BSIZE=(1+NJtot+NDtot)*d; W=(r_buf+1)*BSIZE
     # within-block col offsets (units of d): x_e at 0, then G^(j), then D^(j)
@@ -1431,12 +1435,13 @@ function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf, plans::Vector{_DelayPlan})
         for k in nbrk+1:NJ; Grows[(k-1)*d+1:k*d, :] .= Grows[(nbrk-1)*d+1:nbrk*d, :]; end
         push!(Prows, Grows)
     end
-    # per-delay D rows (β_j≢0): point samples D^(j)_k = x(θbrk_j[k]·h) via dense output
+    # per-delay D rows (β_j≢0): point samples ONLY at the noise-read-target
+    # breakpoints dθbrk (the stage images); pads (k>nD) stay zero (never read).
     for j in 1:g
         NDs[j] == 0 && continue
-        θbrk=θbrks[j]; NJ=NJs[j]; Drows=zeros(NJ*d, W)
-        for k in 1:NJ
-            θk=θbrk[k]; Drows[(k-1)*d+1:k*d, xn_rng] .= Id
+        dθbrk=dθbrks[j]; Drows=zeros(NDs[j]*d, W)
+        for k in 1:nDs[j]
+            θk=dθbrk[k]; Drows[(k-1)*d+1:k*d, xn_rng] .= Id
             for m in 1:S
                 Drows[(k-1)*d+1:k*d, :] .+= (h*_lint(lcoef[m], θk)).*Krows[(m-1)*d+1:m*d, :]
             end
@@ -1458,7 +1463,7 @@ function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf, plans::Vector{_DelayPlan})
     Φstack=Minv*RHSΦ
     φstage=[Φstack[(m-1)*d+1:m*d, :] for m in 1:S]
     return StepVT(Pblock, Yrows, As, αs, βss, σs, Dsels, Bts, θbrks, nbrks,
-                  goffs, doffs, NJs, NDs, a, b, c, lcoef, φstage,
+                  dθbrks, nDs, goffs, doffs, NJs, NDs, a, b, c, lcoef, φstage,
                   h, d, S, W, BSIZE, r_buf, g, anyD)
 end
 
@@ -1528,7 +1533,7 @@ function noise_block_vT(st::StepVT, C)
     Grng(j,k)=((st.goffs[j]+k-1)*d+1 : (st.goffs[j]+k)*d)
     Drng(j,k)=((st.doffs[j]+k-1)*d+1 : (st.doffs[j]+k)*d)
     Gs=[(st.θbrks[j][k], st.Bts[j], Grng(j,k)) for j in 1:g for k in 1:st.NJs[j]]
-    Ds=[(st.θbrks[j][k], Drng(j,k)) for j in 1:g if st.NDs[j]>0 for k in 1:st.NJs[j]]
+    Ds=[(st.dθbrks[j][k], Drng(j,k)) for j in 1:g if st.NDs[j]>0 for k in 1:st.nDs[j]]
     # G–x_e = ∫_0^{θG} B̃_j(u) Δ(u,1) du   (x_e is θ=1 ≥ θG ⇒ single segment)
     for (θG, Bt, rg) in Gs
         acc=zeros(d,d)
@@ -1626,7 +1631,7 @@ function _build_noiseop_vT(st::StepVT)
     Grng(j,k)=((st.goffs[j]+k-1)*d+1 : (st.goffs[j]+k)*d)
     Drng(j,k)=((st.doffs[j]+k-1)*d+1 : (st.doffs[j]+k)*d)
     Gs=[(st.θbrks[j][k], st.Bts[j], Grng(j,k)) for j in 1:g for k in 1:st.NJs[j]]
-    Ds=[(st.θbrks[j][k], Drng(j,k)) for j in 1:g if st.NDs[j]>0 for k in 1:st.NJs[j]]
+    Ds=[(st.dθbrks[j][k], Drng(j,k)) for j in 1:g if st.NDs[j]>0 for k in 1:st.nDs[j]]
     # endpoint block: endm = Σ_m (h b_m) R_m
     grp=newgroup!(1:d, 1:d); for m in 1:S; _kron_acc!(Mten[grp][m], h*b[m], Id, Id); end
     # G–x_e = ∫_0^{θG} B̃(u) Σn(u) (φ(1)/φ(u))ᵀ du
@@ -1905,7 +1910,26 @@ function _delay_bookkeeping(pb::ProbT, j::Integer, S, p, c, h, r_buf, has_beta_j
         (k=findfirst(x->abs(x-θ)<=1e-8, brks[cls(jb)]);
          k===nothing && error("internal vT bookkeeping error: breakpoint lookup " *
             "failed (delay $j, block $jb, θ=$θ) — please report"); k))
-    ND = has_beta_j ? NJ : 0
+    # D-mask: point-sample DOFs are only READ at the noise-read-target breakpoints
+    # (the interior stage images ξ(t_n+c_k h)), never the drift-limit / boundary
+    # ones — so store D only there. Collect the needed breakpoints per class.
+    if has_beta_j
+        dneed=[Set{Int}() for _ in 1:p]
+        for n in 1:p, k in 1:S
+            (jhi,θhi)=locs[n][k+1]
+            (θhi==0.0 || θhi==1.0) && continue
+            push!(dneed[cls(jhi)], bidx(jhi,θhi))
+        end
+        dlist=[sort!(collect(dneed[m])) for m in 1:p]     # G-breakpoint indices needing D
+        ND=maximum(length.(dlist); init=0)
+        dmap=[Dict(gb=>pos for (pos,gb) in enumerate(dlist[m])) for m in 1:p]
+        dθbrks=[vcat(Float64[brks[m][gb] for gb in dlist[m]],
+                     fill(1.0, ND-length(dlist[m]))) for m in 1:p]
+        nDgen=[length(dlist[m]) for m in 1:p]
+    else
+        ND=0; dmap=[Dict{Int,Int}() for _ in 1:p]
+        dθbrks=[Float64[] for _ in 1:p]; nDgen=fill(0,p)
+    end
     plans=Vector{_DelayPlan}(undef,p)
     for n in 1:p
         (jlo,θlo)=locs[n][1]; klo=bidx(jlo,θlo)
@@ -1932,12 +1956,14 @@ function _delay_bookkeeping(pb::ProbT, j::Integer, S, p, c, h, r_buf, has_beta_j
             (jhi,θhi)=locs[n][k+1]
             if θhi == 0.0;     nr[k]=((n-1)-(jhi-1), 0, 0, j)
             elseif θhi == 1.0; nr[k]=((n-1)-jhi,     0, 0, j)
-            else               nr[k]=((n-1)-jhi,     1, bidx(jhi,θhi), j)
+            else               # interior → D-position (noiseread unused when β≡0)
+                nr[k]=((n-1)-jhi, 1, has_beta_j ? dmap[cls(jhi)][bidx(jhi,θhi)] : 0, j)
             end
             0 <= nr[k][1] <= r_buf || error("internal vT bookkeeping error: noise read " *
                 "slot $(nr[k][1]) out of range (delay $j, n=$n, k=$k) — please report")
         end
-        plans[n]=_DelayPlan(θbrks[cls(n)], nbrks[cls(n)], rm, nr, NJ, ND)
+        plans[n]=_DelayPlan(θbrks[cls(n)], nbrks[cls(n)], dθbrks[cls(n)], nDgen[cls(n)],
+                            rm, nr, NJ, ND)
     end
     plans
 end
