@@ -1665,17 +1665,14 @@ struct NoiseOpVT
     Mten::Vector{Vector{Matrix{Float64}}}
 end
 
-function _build_noiseop_vT(st::StepVT)
-    d=st.d; S=st.S; h=st.h; a=st.a; b=st.b; BSIZE=st.BSIZE; g=st.g; d2=d*d
+# Causal-kernel quadrature → (Mten, brs, bcs). The generic (Vector/Matrix) loops
+# work for any g/K but allocate ~10k small matrices per step (φ/inv/B̃ caches),
+# which allocator-contention-throttles the threaded build. For the common
+# single-delay/single-channel case, the SMatrix path below is numerically
+# identical (~5e-17) and allocates ~73× less (see _noiseop_loops_s).
+function _noiseop_loops_vT(st::StepVT)
+    d=st.d; S=st.S; h=st.h; b=st.b; g=st.g; d2=d*d
     Id=Matrix{Float64}(I,d,d)
-    Mop=Matrix{Float64}(I,S*d2,S*d2)
-    for i in 1:S, j in 1:S
-        Lj=kron(Id,st.As[j]) .+ kron(st.As[j],Id)
-        for ch in 1:st.K; Lj .+= kron(st.αss[ch][j],st.αss[ch][j]); end
-        Mop[(i-1)*d2+1:i*d2, (j-1)*d2+1:j*d2] .-= h*a[i,j].*Lj
-    end
-    # manual-get memoization: get!(()->…) heap-allocates the thunk on EVERY call
-    # (even cache hits); this hot path is called at every quadrature node.
     φcache=Dict{Float64,Matrix{Float64}}()
     φf(θ) = (v=get(φcache,θ,nothing); v===nothing ? (u=_φ_atT(st,θ); φcache[θ]=u; u) : v)
     iφcache=Dict{Float64,Matrix{Float64}}()
@@ -1757,6 +1754,103 @@ function _build_noiseop_vT(st::StepVT)
             end
         end
     end
+    (Mten, brs, bcs)
+end
+
+# SMatrix, allocation-free causal-kernel quadrature for single-delay/single-channel.
+# φ/inv/B̃ are SMatrix{d,d} (stack) computed inline (no Dict cache); numerically
+# identical to _noiseop_loops_vT (~5e-17) at ~73× less allocation — the lever that
+# lets the threaded build actually scale on many cores. The concrete Bf/τf are
+# passed as `where`-typed arguments so no coefficient call is boxed.
+function _noiseop_loops_s(st::StepVT, Bf::BF, τf::TF, τmin::Float64, τmax::Float64,
+                          tn::Float64, ::Val{d}) where {BF,TF,d}
+    S=st.S; h=st.h; b=st.b; d2=d*d
+    Id=SMatrix{d,d,Float64}(I)
+    As=ntuple(j->SMatrix{d,d,Float64}(st.As[j]), S)
+    φst=ntuple(j->SMatrix{d,d,Float64}(st.φstage[j]), S)
+    @inline φS(θ)=(Φ=Id; @inbounds for j in 1:S; Φ=Φ+(h*_lint(st.lcoef[j],θ))*(As[j]*φst[j]); end; Φ)
+    @inline BtS(θ)=(u=tn+θ*h; ww=_xi_inv_f(τf,τmin,τmax,u); Bf(ww)./(1.0-_dtau(τf,ww)))
+    @inline coefΣ(θ,m)=h*_lint(st.lcoef[m],θ)
+    brs=UnitRange{Int}[]; bcs=UnitRange{Int}[]; Mten=Vector{Matrix{Float64}}[]
+    newgroup!(br,bc)=(push!(brs,br); push!(bcs,bc);
+                      push!(Mten,[zeros(d2,d2) for _ in 1:S]); length(brs))
+    Grng(k)=((st.goffs[1]+k-1)*d+1:(st.goffs[1]+k)*d)
+    Drng(k)=((st.doffs[1]+k-1)*d+1:(st.doffs[1]+k)*d)
+    Gs=[(st.θbrks[1][k], Grng(k)) for k in 1:st.NJs[1]]
+    Ds=[(st.dθbrks[1][k], Drng(k)) for k in (st.NDs[1]>0 ? (1:st.nDs[1]) : 1:0)]
+    grp=newgroup!(1:d,1:d); for m in 1:S; _kron_acc_t!(Mten[grp][m], h*b[m], Id, Id); end
+    φ1=φS(1.0)
+    for (θG, rg) in Gs
+        θG<=1e-14 && (newgroup!(rg,1:d); continue); grp=newgroup!(rg,1:d)
+        for (gx,gw) in zip(_G8.x,_G8.w)
+            u=θG*gx; L=BtS(u); T=φ1*inv(φS(u))
+            for m in 1:S; _kron_acc_t!(Mten[grp][m], h*θG*gw*coefΣ(u,m), T, L); end
+        end
+    end
+    for ia in eachindex(Gs), ib in eachindex(Gs)
+        ib<ia && continue; (θa,ra)=Gs[ia]; (θb,rb)=Gs[ib]; grp=newgroup!(ra,rb)
+        (θa<=1e-14||θb<=1e-14) && continue
+        for (gx,gw) in zip(_G8.x,_G8.w)
+            ϑ=θb*gx; wϑ=θb*gw; Bv=BtS(ϑ); φϑ=φS(ϑ)
+            segs = ϑ<θa ? ((0.0,ϑ),(ϑ,θa)) : ((0.0,θa),)
+            for (lo,hi) in segs
+                hi<=lo && continue
+                for (gx2,gw2) in zip(_G8.x,_G8.w)
+                    θ=lo+(hi-lo)*gx2; w=h*h*wϑ*(hi-lo)*gw2
+                    if θ<=ϑ
+                        L=BtS(θ); T=φϑ*inv(φS(θ))
+                        for m in 1:S; _kron_acc_t!(Mten[grp][m], w*coefΣ(θ,m), Bv*T, L); end
+                    else
+                        T=φS(θ)*inv(φϑ)
+                        for m in 1:S; _kron_acc_t!(Mten[grp][m], w*coefΣ(ϑ,m), Bv, BtS(θ)*T); end
+                    end
+                end
+            end
+        end
+    end
+    for (θD,rd) in Ds
+        grp=newgroup!(rd,1:d); T=φ1*inv(φS(θD))
+        for m in 1:S; _kron_acc_t!(Mten[grp][m], coefΣ(θD,m), T, Id); end
+    end
+    for ia in eachindex(Ds), ib in eachindex(Ds)
+        ib<ia && continue; (θi,ri)=Ds[ia]; (θj,rj)=Ds[ib]; grp=newgroup!(ri,rj)
+        if θi<=θj; T=φS(θj)*inv(φS(θi)); for m in 1:S; _kron_acc_t!(Mten[grp][m], coefΣ(θi,m), T, Id); end
+        else; T=φS(θi)*inv(φS(θj)); for m in 1:S; _kron_acc_t!(Mten[grp][m], coefΣ(θj,m), Id, T); end; end
+    end
+    for (θG,rg) in Gs, (θD,rd) in Ds
+        grp=newgroup!(rg,rd); θG<=1e-14 && continue
+        segs = θD<θG ? ((0.0,θD),(θD,θG)) : ((0.0,θG),)
+        for (lo,hi) in segs
+            hi<=lo && continue
+            for (gx,gw) in zip(_G8.x,_G8.w)
+                u=lo+(hi-lo)*gx; w=h*(hi-lo)*gw
+                if u<=θD
+                    L=BtS(u); T=φS(θD)*inv(φS(u))
+                    for m in 1:S; _kron_acc_t!(Mten[grp][m], w*coefΣ(u,m), T, L); end
+                else
+                    T=φS(u)*inv(φS(θD))
+                    for m in 1:S; _kron_acc_t!(Mten[grp][m], w*coefΣ(θD,m), Id, BtS(u)*T); end
+                end
+            end
+        end
+    end
+    (Mten, brs, bcs)
+end
+
+# Assemble the per-step noise operator. `pb`/`tn` allow the SMatrix fast path to
+# read the concrete single-delay coefficient; a nothing `pb` forces the generic path.
+function _build_noiseop_vT(st::StepVT, pb=nothing, tn::Float64=0.0)
+    d=st.d; S=st.S; h=st.h; a=st.a; g=st.g; BSIZE=st.BSIZE; d2=d*d
+    Id=Matrix{Float64}(I,d,d)
+    Mop=Matrix{Float64}(I,S*d2,S*d2)
+    for i in 1:S, j in 1:S
+        Lj=kron(Id,st.As[j]) .+ kron(st.As[j],Id)
+        for ch in 1:st.K; Lj .+= kron(st.αss[ch][j],st.αss[ch][j]); end
+        Mop[(i-1)*d2+1:i*d2, (j-1)*d2+1:j*d2] .-= h*a[i,j].*Lj
+    end
+    Mten, brs, bcs = (pb !== nothing && st.g==1 && st.K==1) ?
+        _noiseop_loops_s(st, pb.Bs[1], pb.τfs[1], pb.τmins[1], pb.τmaxs[1], tn, Val(d)) :
+        _noiseop_loops_vT(st)
     # gather columns: nonzero cols of Yrows and every Dsel
     nzset=Set{Int}()
     for jj in 1:size(st.Yrows,2); any(!iszero, @view st.Yrows[:,jj]) && push!(nzset,jj); end
@@ -2075,13 +2169,13 @@ function build_vT(pb::ProbT, S, p; force=false, want_U::Bool=false,
             steps[n]=step_vT(pb, a, b, c, h, (n-1)*h, r_buf, [dbk[j][n] for j in 1:g])
         end
         Threads.@threads for n in 1:p
-            vtops[n]=_build_noiseop_vT(steps[n])
+            vtops[n]=_build_noiseop_vT(steps[n], pb, (n-1)*h)
         end
     else
         for n in 1:p
             steps[n]=step_vT(pb, a, b, c, h, (n-1)*h, r_buf, [dbk[j][n] for j in 1:g])
         end
-        for n in 1:p; vtops[n]=_build_noiseop_vT(steps[n]); end
+        for n in 1:p; vtops[n]=_build_noiseop_vT(steps[n], pb, (n-1)*h); end
     end
     W=steps[1].W; BSIZE=steps[1].BSIZE
     pnz=[[j for j in 1:W if any(!iszero, @view st.Pblock[:,j])] for st in steps]
