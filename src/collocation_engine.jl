@@ -288,7 +288,16 @@ function _lagr_coefs(c)
     end
     coefs
 end
-_lint(coef, θ) = sum(ck*θ^k/k for (k,ck) in enumerate(coef))
+# ∫₀^θ Σ_k coef[k] s^{k-1} ds = Σ_k coef[k] θ^k / k. Explicit loop (θ^k, in order)
+# is bit-identical to the former generator-sum but allocation-free — this is called
+# at every quadrature node of the noise-operator build.
+function _lint(coef, θ)
+    s = 0.0
+    @inbounds for k in 1:length(coef)
+        s += coef[k]*θ^k/k
+    end
+    s
+end
 
 # 8-point Gauss–Legendre on [0,1]
 const _G8 = let
@@ -1345,9 +1354,10 @@ _xi_inv(pb::ProbT, j::Integer, u) = _xi_inv_f(pb.τfs[j], pb.τmins[j], pb.τmax
 # quadrature-node evaluation allocation-free — the single largest build speedup.
 function _make_Bt(τf::TF, Bf::BF, τmin::Float64, τmax::Float64, t_n, h) where {TF,BF}
     cache=Dict{Float64,Matrix{Float64}}()
-    θ -> get!(cache, θ) do
+    function (θ)                             # manual get (get!-do heap-allocs the thunk)
+        v=get(cache,θ,nothing); v===nothing || return v
         u=t_n+θ*h; w=_xi_inv_f(τf, τmin, τmax, u); ξp=1.0-_dtau(τf, w)
-        Matrix(Bf(w)) ./ ξp
+        B=Matrix(Bf(w)) ./ ξp; cache[θ]=B; B
     end
 end
 
@@ -1664,8 +1674,12 @@ function _build_noiseop_vT(st::StepVT)
         for ch in 1:st.K; Lj .+= kron(st.αss[ch][j],st.αss[ch][j]); end
         Mop[(i-1)*d2+1:i*d2, (j-1)*d2+1:j*d2] .-= h*a[i,j].*Lj
     end
-    φcache=Dict{Float64,Matrix{Float64}}();  φf(θ)=get!(()->_φ_atT(st,θ),φcache,θ)
-    iφcache=Dict{Float64,Matrix{Float64}}(); iφf(θ)=get!(()->inv(φf(θ)),iφcache,θ)
+    # manual-get memoization: get!(()->…) heap-allocates the thunk on EVERY call
+    # (even cache hits); this hot path is called at every quadrature node.
+    φcache=Dict{Float64,Matrix{Float64}}()
+    φf(θ) = (v=get(φcache,θ,nothing); v===nothing ? (u=_φ_atT(st,θ); φcache[θ]=u; u) : v)
+    iφcache=Dict{Float64,Matrix{Float64}}()
+    iφf(θ) = (v=get(iφcache,θ,nothing); v===nothing ? (u=inv(φf(θ)); iφcache[θ]=u; u) : v)
     T1=Matrix{Float64}(undef,d,d); T2=Matrix{Float64}(undef,d,d)
     brs=UnitRange{Int}[]; bcs=UnitRange{Int}[]; Mten=Vector{Matrix{Float64}}[]
     newgroup!(br,bc)=(push!(brs,br); push!(bcs,bc);
