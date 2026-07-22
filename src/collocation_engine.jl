@@ -1149,6 +1149,7 @@ end
 _inv_lmap(lmap) = (imap=similar(lmap); @inbounds for c in eachindex(lmap); imap[lmap[c]]=c; end; imap)
 
 function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=30)
+    haskey(eng, :vtops) && return _rho_H_krylov_vT_ring(eng; tol=tol, krylovdim=krylovdim)
     haskey(eng, :ops) || return _rho_H_krylov_v9m_ref(eng; tol=tol, krylovdim=krylovdim)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
@@ -1184,6 +1185,7 @@ function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=30)
 end
 
 function fixPoint_v9m(eng; tol=1e-11, krylovdim=30)
+    haskey(eng, :vtops) && return _fixPoint_vT_ring(eng; tol=tol, krylovdim=krylovdim)
     haskey(eng, :ops) || return _fixPoint_v9m_ref(eng; tol=tol, krylovdim=krylovdim)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
@@ -1787,6 +1789,90 @@ function applyH_vT(eng,C)
     return Ck
 end
 
+# ---------------------------------------------------------------------------
+# Allocation-free ring-buffer one-period map for vT (mirrors _applyH_period_ring!).
+# Generalizes v9's two-range P·C to a SPARSE-COLUMN gather: Pblock reads only a
+# few logical columns (~2% dense — the telescoping G/D reads + x_e), precomputed
+# per step as (pnz, Pc = Pblock[:,pnz]). The O(W²) history shift-copy is replaced
+# by a rotation offset; only the dropped slot is overwritten each step.
+struct VTWorkspace
+    C::Matrix{Float64}
+    PC::Matrix{Float64}
+    nd::Matrix{Float64}
+    Crows::Matrix{Float64}     # gathered P-nonzero rows of C (maxnz × W)
+    physnz::Vector{Int}
+    Cnz::Matrix{Float64}
+    pnzphys::Vector{Int}
+    lmap::Vector{Int}
+end
+VTWorkspace(eng) = begin
+    nnz = maximum(length(o.nzc) for o in eng.vtops)
+    maxp = maximum(length(p) for p in eng.pnz)
+    VTWorkspace(zeros(eng.W,eng.W), zeros(eng.BSIZE,eng.W), zeros(eng.BSIZE,eng.BSIZE),
+                Matrix{Float64}(undef, maxp, eng.W), Vector{Int}(undef,nnz),
+                Matrix{Float64}(undef,nnz,nnz), Vector{Int}(undef,maxp),
+                Vector{Int}(undef, eng.W))
+end
+
+function _applyH_period_ring_vT!(ws::VTWorkspace, eng)
+    B=eng.BSIZE; r=eng.r; nblk=r+1
+    C=ws.C; PC=ws.PC; nd=ws.nd
+    o=0
+    @inbounds for n in 1:eng.p
+        nzp=eng.pnz[n]; Pc=eng.Pc[n]; op=eng.vtops[n]; m=length(nzp)
+        for t in 1:m; c=nzp[t]; bb=(c-1)÷B; w=c-bb*B; ws.pnzphys[t]=((o+bb)%nblk)*B+w; end
+        Crows=@view ws.Crows[1:m, :]
+        for t in 1:m; @views copyto!(Crows[t:t, :], C[ws.pnzphys[t]:ws.pnzphys[t], :]); end
+        mul!(PC, Pc, Crows)                                # PC = P·C (physical cols)
+        @views mul!(nd, PC[:, ws.pnzphys[1:m]], transpose(Pc))   # newdiag = PC·Pᵀ
+        nnz=length(op.nzc)
+        for t in 1:nnz; c=op.nzc[t]; bb=(c-1)÷B; w=c-bb*B; ws.physnz[t]=((o+bb)%nblk)*B+w; end
+        @views _noise_apply_add_v9_phys!(nd, op, C, ws.physnz[1:nnz], ws.Cnz[1:nnz,1:nnz])
+        new_b=(o+r)%nblk; nrng=new_b*B+1 : new_b*B+B
+        for q in 0:nblk-1
+            q==new_b && continue
+            qrng=q*B+1 : q*B+B
+            @views copyto!(C[nrng,qrng], PC[:,qrng])
+            @views transpose!(C[qrng,nrng], PC[:,qrng])
+        end
+        @views copyto!(C[nrng,nrng], nd)
+        o=new_b
+    end
+    return o
+end
+
+function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=30)
+    W=eng.W; B=eng.BSIZE; nblk=eng.r+1
+    idx=_vech_idx(W); Nv=length(idx)
+    ws=VTWorkspace(eng)
+    lmap=_fill_lmap!(ws.lmap, mod(-eng.p, nblk), B, nblk); imap=_inv_lmap(lmap)
+    C=ws.C
+    unpack!(v)=(@inbounds for k in 1:Nv;(i,j)=idx[k];C[i,j]=v[k];C[j,i]=v[k];end)
+    fill!(C,0.0); _applyH_period_ring_vT!(ws,eng); D=_pack_ring(C,imap,Nv)
+    op(v)=(unpack!(v); _applyH_period_ring_vT!(ws,eng); _pack_ring(C,imap,Nv) .- D)
+    x0=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k]; i==j && (x0[k]=1.0); end
+    vals,_,_=KrylovKit.eigsolve(op,x0,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),
+                                maxiter=300,eager=true)
+    maximum(abs.(vals))
+end
+
+function _fixPoint_vT_ring(eng; tol=1e-11, krylovdim=30)
+    W=eng.W; B=eng.BSIZE; nblk=eng.r+1
+    idx=_vech_idx(W); Nv=length(idx)
+    ws=VTWorkspace(eng)
+    lmap=_fill_lmap!(ws.lmap, mod(-eng.p, nblk), B, nblk); imap=_inv_lmap(lmap)
+    C=ws.C
+    unpack!(v)=(@inbounds for k in 1:Nv;(i,j)=idx[k];C[i,j]=v[k];C[j,i]=v[k];end)
+    fill!(C,0.0); _applyH_period_ring_vT!(ws,eng); dvec=_pack_ring(C,imap,Nv)
+    Hlin(v)=(unpack!(v); _applyH_period_ring_vT!(ws,eng); _pack_ring(C,imap,Nv) .- dvec)
+    sol,info=KrylovKit.linsolve(v->v .- Hlin(v), dvec, dvec; tol=tol,
+                                krylovdim=min(krylovdim,Nv), maxiter=300)
+    info.converged==0 && @warn "fixPoint (vT ring): not fully converged" info
+    Cout=zeros(W,W)
+    @inbounds for k in 1:Nv; (i,j)=idx[k]; Cout[i,j]=sol[k]; Cout[j,i]=sol[k]; end
+    Cout
+end
+
 rho_U_vT(eng)=maximum(abs.(eigen(eng.U).values))
 
 # Per-delay bookkeeping for delay j: breakpoints (per residue class), drift
@@ -1883,9 +1969,12 @@ function build_vT(pb::ProbT, S, p; force=false, want_U::Bool=false)
     dbk=[_delay_bookkeeping(pb, j, S, p, c, h, r_buf, !_no_delay_noise(pb, j)) for j in 1:g]
     steps=[step_vT(pb, a, b, c, h, (n-1)*h, r_buf, [dbk[j][n] for j in 1:g]) for n in 1:p]
     W=steps[1].W; BSIZE=steps[1].BSIZE
-    # precompute per-step noise operators (the Krylov hot path); applyH_vT uses them
+    # precompute per-step noise operators + P column sparsity (the Krylov hot path)
     vtops=[_build_noiseop_vT(st) for st in steps]
-    eng=(steps=steps, vtops=vtops, W=W, BSIZE=BSIZE, p=p, r=r_buf, d=pb.d, engine=:vT)
+    pnz=[[j for j in 1:W if any(!iszero, @view st.Pblock[:,j])] for st in steps]
+    Pc=[steps[i].Pblock[:, pnz[i]] for i in 1:p]
+    eng=(steps=steps, vtops=vtops, pnz=pnz, Pc=Pc,
+         W=W, BSIZE=BSIZE, p=p, r=r_buf, d=pb.d, engine=:vT)
     if want_U
         U=Matrix{Float64}(I,W,W)
         for st in steps
