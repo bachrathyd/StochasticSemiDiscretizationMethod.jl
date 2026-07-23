@@ -2037,7 +2037,7 @@ function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=30)
     C=ws.C
     unpack!(v)=(@inbounds for k in 1:Nv;(i,j)=idx[k];C[i,j]=v[k];C[j,i]=v[k];end)
     fill!(C,0.0); _applyH_period_ring_vT!(ws,eng); D=_pack_ring(C,imap,Nv)
-    op(v)=(unpack!(v); _applyH_period_ring_vT!(ws,eng); _pack_ring(C,imap,Nv) .- D)
+    op(v)=(unpack!(v); _applyH_period_ring_vT!(ws,eng); p=_pack_ring(C,imap,Nv); p.-=D; p)
     x0=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k]; i==j && (x0[k]=1.0); end
     vals,_,_=KrylovKit.eigsolve(op,x0,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),
                                 maxiter=300,eager=true)
@@ -2052,7 +2052,7 @@ function _fixPoint_vT_ring(eng; tol=1e-11, krylovdim=30)
     C=ws.C
     unpack!(v)=(@inbounds for k in 1:Nv;(i,j)=idx[k];C[i,j]=v[k];C[j,i]=v[k];end)
     fill!(C,0.0); _applyH_period_ring_vT!(ws,eng); dvec=_pack_ring(C,imap,Nv)
-    Hlin(v)=(unpack!(v); _applyH_period_ring_vT!(ws,eng); _pack_ring(C,imap,Nv) .- dvec)
+    Hlin(v)=(unpack!(v); _applyH_period_ring_vT!(ws,eng); p=_pack_ring(C,imap,Nv); p.-=dvec; p)
     sol,info=KrylovKit.linsolve(v->v .- Hlin(v), dvec, dvec; tol=tol,
                                 krylovdim=min(krylovdim,Nv), maxiter=300)
     info.converged==0 && @warn "fixPoint (vT ring): not fully converged" info
