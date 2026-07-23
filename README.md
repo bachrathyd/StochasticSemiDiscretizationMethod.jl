@@ -90,7 +90,7 @@ The detection is a structural test of the coefficient functions — you pass you
 either way (verified to `10⁻¹³` on both `ρ(𝓗)` and the stationary variance): the
 pruning changes only the cost, never the number. On top of that, every path here
 is orders of magnitude cheaper than the classical explicit period product — the
-multiplication-free evaluation alone is ≈`8.5×10³` faster at `p = 192` (see the
+multiplication-free evaluation alone is ≈`1.3×10⁴` faster at `p = 192` (see the
 [paper](paper/)'s work-precision study).
 
 > **Timing tip.** These solvers do many small/thin matrix products, and default

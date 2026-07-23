@@ -19,6 +19,13 @@ const CSV  = joinpath(@__DIR__, "wp_ultra.csv")
 const PNG  = joinpath(@__DIR__, "wp_ultra.png")
 const PDF  = joinpath(@__DIR__, "wp_ultra.pdf")
 const PAPER_IMG = joinpath(@__DIR__, "..", "journal_paper", "images")  # local paper images
+# MF_ONLY re-timing mode: the classical explicit-product / step-recursion code is
+# untouched by the solver speedups, so its rows are reused verbatim from the CSV
+# and only the (fast) multiplication-free column is re-measured.  Set WP_MF_ONLY=1.
+const MFONLY = get(ENV, "WP_MF_ONLY", "0") == "1"
+const NREP   = parse(Int, get(ENV, "WP_NREP", "5"))    # min-over-repeats (caption)
+timed_min(f, k) = (best = (GC.gc(); @timed f());
+    for _ in 2:k; GC.gc(); r = @timed f(); r.time < best.time && (best = r); end; best)
 
 # fully periodic stochastic delayed Mathieu (all matrices time-periodic)
 function lddep()
@@ -89,13 +96,23 @@ function redraw()
 end
 
 stopped_cl = Ref(false)
+if MFONLY && isfile(CSV)                        # reuse untouched classical rows
+    local old = readdlm(CSV, ',', skipstart=1)
+    for r in eachrow(old)
+        r[1] == "classical" || continue
+        push!(rows, (method="classical", p=Int(r[2]), D=Int(r[3]),
+                     t=Float64(r[4]), mem=Float64(r[5]), err=Float64(r[6])))
+    end
+    @printf("MF_ONLY: reusing %d classical rows from CSV\n",
+            count(r->r.method=="classical", rows)); flush(stdout)
+    stopped_cl[] = true                         # do NOT recompute the classical column
+end
 ps_all = [8,12,16,24,32,48,64,96,128,192,256,384,512,768,1024,1536,2048]
 for p in ps_all
     rst = rst_at(p)
     D = SSDM.CovVecIdx(rst.n).sectionStarts[end]
-    # MF (factored, matrix-free)
-    GC.gc()
-    st = @timed spectralRadiusOfMapping_MF_factored(rst; krylovdim=15)
+    # MF (factored, matrix-free) — min over NREP repeats after warm-up (caption)
+    st = timed_min(() -> spectralRadiusOfMapping_MF_factored(rst; krylovdim=15), NREP)
     push!(rows, (method="MF", p=p, D=D, t=st.time, mem=st.bytes/1e6, err=abs(st.value-ρref)))
     @printf("p=%5d MF        t=%8.2fs mem=%9.1fMB err=%.3e\n", p, st.time, st.bytes/1e6,
             abs(st.value-ρref)); flush(stdout)

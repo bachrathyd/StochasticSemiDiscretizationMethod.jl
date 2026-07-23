@@ -120,10 +120,15 @@ if mode in ("bf","both")
     @printf("2DOF BF TOTAL: %.1f s\n", time()-t0); flush(stdout)
 end
 
+# The `::Float64` assertions pin the curve-function value type for MDBM: the map
+# builds its solution containers from the inferred return type, and the factored
+# spectral-radius solver's `return_vec` keyword makes its return type-inferred as
+# a `Union` (a boxed scalar), which would otherwise leave MDBM with `zero(::Any)`.
+# The runtime value is always a `Float64`, so the assertion is a no-op on values.
 CURVEDEFS = Dict{String,Function}(
-    "cs_det"  => (ξ,w) -> solve_point(10.0^ξ, w; rva=0.0, σcv=0.0, σav=0.0)[1] - 1.0,
-    "ssv_det" => (ξ,w) -> solve_point(10.0^ξ, w; σcv=0.0, σav=0.0)[1] - 1.0,
-    "ssv_sto" => (ξ,w) -> solve_point(10.0^ξ, w)[1] - 1.0,
+    "cs_det"  => (ξ,w) -> (solve_point(10.0^ξ, w; rva=0.0, σcv=0.0, σav=0.0)[1] - 1.0)::Float64,
+    "ssv_det" => (ξ,w) -> (solve_point(10.0^ξ, w; σcv=0.0, σav=0.0)[1] - 1.0)::Float64,
+    "ssv_sto" => (ξ,w) -> (solve_point(10.0^ξ, w)[1] - 1.0)::Float64,
     "ssv_var" => (ξ,w) -> begin
         ρ,v = solve_point(10.0^ξ, w; want_var=true)
         (ρ ≥ 0.999 || isnan(v)) ? 1.0 : (v - VARLIM)
