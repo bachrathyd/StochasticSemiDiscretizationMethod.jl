@@ -19,30 +19,48 @@
 # `βs` may be shorter (missing ⇒ that delay carries no noise).
 function _collocation_prob(prob::LDDEProblem, period::Real)
     d = size(prob.A(0.0), 1)
-    # single Wiener channel: all noise terms must share one nID
+    # Wiener channels: distinct noise identifiers across α/β/σ. Independent
+    # channels sum in the Itô isometry; a single channel is the common case.
     nids = Int[]
     for x in prob.αs; push!(nids, x.nID); end
     for x in prob.βs; push!(nids, x.nID); end
     for x in prob.σs; push!(nids, x.nID); end
-    length(unique(nids)) ≤ 1 ||
-        error("the collocation solver supports a single Wiener channel (got channels " *
-              "$(sort(unique(nids))))")
+    chans = sort(unique(nids))
+    K = length(chans)
     g = length(prob.Bs)
     g ≥ 1 || error("the collocation solver needs at least one delay term")
     A = t -> Matrix{Float64}(prob.A(t))
-    α = isempty(prob.αs) ? (t -> zeros(d, d)) : (t -> Matrix{Float64}(prob.αs[1](t)))
-    σ = isempty(prob.σs) ? (t -> zeros(d, 1)) :
-        (t -> reshape(Vector{Float64}(prob.σs[1].V(t)), d, :))
     τraws = [prob.Bs[j].τ.τ for j in 1:g]
-    # single constant delay → scalar `Prob` (aligned 2S / incommensurate paths)
-    if g == 1 && (τraws[1] isa Real)
+    # a β delayed-noise term must read at one of the drift delays τ_j (the engine
+    # only carries history DOFs for the registered delays); shared τ object or,
+    # for constants, exact numeric match.
+    same_delay(a, b) = (a === b) ||
+        (a isa Real && b isa Real && abs(a - b) ≤ 1e-12 * max(abs(a), 1.0))
+    for x in prob.βs
+        any(same_delay(x.cMX.τ.τ, τraws[j]) for j in 1:g) ||
+            error("a delayed multiplicative-noise term (β, channel $(x.nID)) has a " *
+                  "delay τ that matches none of the drift delays B_j — register that " *
+                  "delay with a (possibly zero) DelayMX in the Bs list")
+    end
+    # single Wiener channel + single constant delay → scalar `Prob` (aligned 2S /
+    # incommensurate single-channel engines v8/v9, untouched, bit-identical).
+    # All noise terms live on the one channel (or none) ⇒ same-channel terms sum
+    # (every β reads at the single delay τ, guaranteed by the guard above).
+    if K ≤ 1 && g == 1 && (τraws[1] isa Real)
+        α = isempty(prob.αs) ? (t -> zeros(d, d)) :
+            (t -> sum(Matrix{Float64}(x(t)) for x in prob.αs))
+        σ = isempty(prob.σs) ? (t -> zeros(d, 1)) :
+            (t -> sum(reshape(Vector{Float64}(x.V(t)), d, :) for x in prob.σs))
         B = t -> Matrix{Float64}(prob.Bs[1](t))
-        β = isempty(prob.βs) ? (t -> zeros(d, d)) : (t -> Matrix{Float64}(prob.βs[1](t)))
+        β = isempty(prob.βs) ? (t -> zeros(d, d)) :
+            (t -> sum(Matrix{Float64}(x(t)) for x in prob.βs))
         return Prob(d, float(period), float(τraws[1]), A, B, α, β, σ)
     end
-    # g ≥ 1, function-valued and/or multiple delays → ProbT
-    τfs = Function[]; τmins = Float64[]; τmaxs = Float64[]
-    Bs = Function[]; βs = Function[]
+    # otherwise → ProbT: g delays × K channels. Per-channel α/β/σ; each β is paired
+    # to the drift delay with an identical τ (the natural regenerative construction
+    # reuses one τ object for B_j and β_j). Independent channels sum in the noise
+    # injection. Noise-free ⇒ one trivial zero channel.
+    τfs = Function[]; τmins = Float64[]; τmaxs = Float64[]; Bs = Function[]
     for j in 1:g
         τr = τraws[j]
         τf = τr isa Real ? (let v = float(τr); t -> v end) : (t -> float(τr(t)))
@@ -50,11 +68,38 @@ function _collocation_prob(prob::LDDEProblem, period::Real)
         all(isfinite, τsamp) ||
             error("delay τ_$j(t) returned a non-finite value on [0, T]")
         push!(τfs, τf); push!(τmins, minimum(τsamp)); push!(τmaxs, maximum(τsamp))
-        push!(Bs, t -> Matrix{Float64}(prob.Bs[j](t)))
-        push!(βs, j ≤ length(prob.βs) ? (t -> Matrix{Float64}(prob.βs[j](t))) :
-                  (t -> zeros(d, d)))
+        # preserve the user's return type (an SMatrix stays stack-allocated) so the
+        # SMatrix noise-operator fast path stays allocation-free; the generic path
+        # converts with Matrix(...) as before.
+        push!(Bs, t -> prob.Bs[j](t))
     end
-    ProbT(d, float(period), τfs, τmins, τmaxs, A, Bs, α, βs, σ)
+    cids = isempty(chans) ? Int[typemin(Int)] : chans   # trivial channel if noise-free
+    chanidx = Dict(cid => i for (i, cid) in enumerate(cids))
+    # bucket each β term into (channel, first drift delay of matching τ) exactly once
+    # — summing multiples and never double-counting when two B_j happen to share a τ
+    # (every β is guaranteed to match some delay by the guard above).
+    βbucket = [[Any[] for _ in 1:g] for _ in cids]
+    for x in prob.βs
+        j = findfirst(jj -> same_delay(x.cMX.τ.τ, τraws[jj]), 1:g)
+        push!(βbucket[chanidx[x.nID]][j], x)
+    end
+    αs = Function[]; σs = Function[]; βss = Vector{Function}[]
+    for (ci, cid) in enumerate(cids)
+        αterms = [x for x in prob.αs if x.nID == cid]
+        push!(αs, isempty(αterms) ? (t -> zeros(d, d)) :
+                  (t -> sum(Matrix{Float64}(x(t)) for x in αterms)))
+        σterms = [x for x in prob.σs if x.nID == cid]
+        push!(σs, isempty(σterms) ? (t -> zeros(d, 1)) :
+                  (t -> sum(reshape(Vector{Float64}(x.V(t)), d, :) for x in σterms)))
+        βrow = Function[]
+        for j in 1:g
+            βterms = βbucket[ci][j]
+            push!(βrow, isempty(βterms) ? (t -> zeros(d, d)) :
+                        (t -> sum(Matrix{Float64}(x(t)) for x in βterms)))
+        end
+        push!(βss, βrow)
+    end
+    ProbT(d, float(period), τfs, τmins, τmaxs, A, Bs, αs, βss, σs)
 end
 
 # integer lag r if τ = r·(T/p) within tolerance, else 0
