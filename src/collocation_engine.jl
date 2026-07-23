@@ -1441,12 +1441,13 @@ function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf, plans::Vector{_DelayPlan})
         base = Gcol(j, lag, idx)
         for q in 1:d; erow[q, base+q] += sgn; end
     end
-    for m in 1:S; erow .+= h*b[m].*(As[m]*Yrows[(m-1)*d+1:m*d, :]); end
+    # in-place accumulate (mul! / @view avoid the d×W slice-copies in these loops)
+    for m in 1:S; mul!(erow, As[m], @view(Yrows[(m-1)*d+1:m*d, :]), h*b[m], 1.0); end
     # continuous output K = (a⁻¹ ⊗ I)(Y − 1 x_n)/h
     Ainv=inv(a)
     Krows=zeros(S*d, W)
     for jj in 1:S, m in 1:S
-        Krows[(jj-1)*d+1:jj*d, :] .+= Ainv[jj,m].*Yrows[(m-1)*d+1:m*d, :]
+        @views Krows[(jj-1)*d+1:jj*d, :] .+= Ainv[jj,m].*Yrows[(m-1)*d+1:m*d, :]
         Krows[(jj-1)*d+1:jj*d, xn_rng] .-= Ainv[jj,m].*Id
     end
     Krows ./= h
@@ -1467,7 +1468,7 @@ function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf, plans::Vector{_DelayPlan})
                     for m in 1:S; Wk[m] .+= (wq*h*_lint(lcoef[m], θ)).*Bv; end
                 end
                 acc[:, xn_rng] .+= Wx
-                for m in 1:S; acc .+= Wk[m]*Krows[(m-1)*d+1:m*d, :]; end
+                for m in 1:S; mul!(acc, Wk[m], @view(Krows[(m-1)*d+1:m*d, :]), 1.0, 1.0); end
             end
             Grows[(k-1)*d+1:k*d, :] .= acc
             θprev=θk
@@ -1483,7 +1484,7 @@ function step_vT(pb::ProbT, a, b, c, h, t_n, r_buf, plans::Vector{_DelayPlan})
         for k in 1:nDs[j]
             θk=dθbrk[k]; Drows[(k-1)*d+1:k*d, xn_rng] .= Id
             for m in 1:S
-                Drows[(k-1)*d+1:k*d, :] .+= (h*_lint(lcoef[m], θk)).*Krows[(m-1)*d+1:m*d, :]
+                @views Drows[(k-1)*d+1:k*d, :] .+= (h*_lint(lcoef[m], θk)).*Krows[(m-1)*d+1:m*d, :]
             end
         end
         push!(Prows, Drows)
