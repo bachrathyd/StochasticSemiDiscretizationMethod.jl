@@ -1,5 +1,65 @@
 # Figure status (paper-sources)
 
+## Round 3 re-timing (2026-07-23): real-Schur default + fused static extraction + per-step Mop-LU + d-adaptive Krylov dim
+
+All ρ / Var / stability-boundary **values remain bit-identical** to rounds 1–2 — the
+round-3 speedups changed only CPU time and memory — so every accuracy / convergence /
+stability figure is pixel-identical and was **not** regenerated. Only CPU-bearing
+tables, the two work-precision figures, and the ratio text changed.
+
+**Protocol (essential):** all CPU numbers on the dual-socket Xeon Gold 6154
+(2×18 cores, 192 GB), Julia 1.12, **single-threaded solve (BLAS 1)** unless a thread
+count is stated. On this NUMA machine multi-thread BLAS *slows* the memory-bound
+factored solve — an 8-thread BLAS re-time gave 2.7× **worse** d=200 (224 s → 573 s);
+the paper's single-threaded protocol is required for the factored solves.
+
+**Re-timed / regenerated:**
+- `tab:kron_scaling` — factored-solve column, BLAS 1: `0.16 / 1.38 / 1.60 / 5.30 /
+  24.3 / 224.5` s (d = 4…200). Fused static extraction speeds the d≤8 build; the
+  real-Schur driver keeps the Krylov basis `Float64` (≈½ the basis memory at large
+  d) at a small time cost, so d=8 / d=200 are marginally slower than round-2 while
+  memory (not shown in this time-only table) is lower — the right default for the
+  large-d thesis. Dense column unchanged (assembly untouched). d=200 = 3.74 min.
+- `tab:ssv_cost` — variance color map **1673 → 566 s** (6048 pts, 56 threads); the two
+  MF stochastic MDBM boundaries re-timed at niter=5 (matching the committed point
+  counts): `ssv_sto` **652 → 186 s** / 846 pts, `ssv_var` **946 → 264 s** / 629 pts;
+  the two deterministic (LR) boundaries (`cs_det` 39 s / 4193 pts, `ssv_det` 1025 s /
+  8395 pts) **unchanged** (that solver was untouched). Fig 8 image value-identical.
+  NB: `benchmark/ssv2dof_chart.jl` gained a `::Float64` assertion on the scalar MDBM
+  curve functions — the factored spectral-radius solver's `return_vec` keyword makes
+  its return type-inferred as a `Union` (boxed scalar), which broke MDBM's
+  `zero(::Any)`; the runtime value is always `Float64`, so this is a value no-op
+  (proper type-stability fix tracked as a follow-up task).
+- `wp_ultra` (fig + abstract + caption + body + README L93) — MF curve re-timed: at
+  p=192 MF is **0.030 s / 22 MB** (was 0.045 / 39), so the explicit-product advantage
+  grows to **1.3×10⁴** time / **1.8×10⁴** allocation (was 8.5×10³ / 1.0×10⁴ in the
+  body, and a *stale* 1.3×10³ / 6.3×10³ in the abstract **and** caption — now all
+  consistent); the step-recursion advantage at p=1024 is **≈420×** (the caption's
+  round-1 "≈32×" was stale). Classical + recursion curves reused verbatim (untouched).
+- `HighOrderConvergence.png` (README, error vs CPU time) — **regenerated** round-3
+  (values bit-identical; GL / classical curves shift left).
+- beam text (d=32, D=2.16×10⁶): **134 → 142 s** (schur's small time cost at moderate d;
+  value bit-identical, ρ(H)=1.2254511).
+
+**Not regenerated (with reason):**
+- `grand_triple` (PD-Mathieu work-precision, CPU-time axis) — its data + IBP dev
+  harness (`highorder/cov_colloc_v8_ibp.jl`) were deleted at packaging and IBP is not
+  in the shipped package, so it cannot be cleanly regenerated. Round-3 only makes its
+  curves *faster*, so the round-2 figure is **conservative** (understates the
+  advantage); all plotted accuracy values are bit-identical. Kept.
+- `grand_orders_pub`, `grand_stored`, `pd_mathieu_orders`, `fig1_sykora_fig4_repro`,
+  `beam_mesh_convergence`, `ssv_chart` (Fig 8), `cmp_iklodi`, `ssv_vt_orders`,
+  `helical_milling_order` — value / order / resolution axes ⇒ bit-identical, pixel-
+  identical. Not regenerated.
+- `gpu_chain_scaling` — HW-bound: CPU side stale, needs a working GPU; the P4000 CUDA
+  round-trip fails (toolkit too new for Pascal). Unchanged from round-2.
+- cmp_iklodi "about a minute" text — soft order-of-magnitude claim ("within roughly an
+  order of magnitude of the algebraic method"); round-3 (~2×) does not change it. Kept.
+
+---
+
+## Rounds 1–2 audit (earlier)
+
 Audit of the figures included by `main_MFSSD.tex`, after the two rounds of solver
 speedups on the `package-cleanup` branch. **The speedups changed only wall-clock
 timings — every ρ / Var / stability-boundary value is bit-identical**, so the
