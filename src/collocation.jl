@@ -113,7 +113,9 @@ end
 # engine for the detected delay class and warn when the attainable order is
 # below the 2S the aligned engine advertises.
 function _build_collocation(pb::Prob, S::Integer, p::Integer;
-                            force::Bool=false, verbosity::Integer=1)
+                            force::Bool=false, verbosity::Integer=1,
+                            parallel::Bool=Threads.nthreads() > 1)
+    # (the aligned v9 build is cheap and serial; `parallel` matters for the vT path)
     _aligned_r(pb.τ, pb.T, p) > 0 && return build_v9m(pb, S, p; force=force)
     verbosity ≥ 1 &&
         @warn "constant delay τ = $(pb.τ) is not an integer multiple of Δt = T/n_steps " *
@@ -123,16 +125,17 @@ function _build_collocation(pb::Prob, S::Integer, p::Integer;
               "(suppress with verbosity=0)" maxlog=1
     τ0 = pb.τ
     pbT = ProbT(pb.d, pb.T, t -> τ0, τ0, τ0, pb.A, pb.B, pb.α, pb.β, pb.σ)
-    build_vT(pbT, S, p; force=force)
+    build_vT(pbT, S, p; force=force, parallel=parallel)
 end
 function _build_collocation(pb::ProbT, S::Integer, p::Integer;
-                            force::Bool=false, verbosity::Integer=1)
+                            force::Bool=false, verbosity::Integer=1,
+                            parallel::Bool=Threads.nthreads() > 1)
     verbosity ≥ 1 &&
         @warn "using the fractional-limit collocation engine ($(_ndelays(pb)) " *
               "delay(s), function-valued and/or misaligned) — order floor $(S+1) " *
               "(observed in [$(S+1), $(2S)]); the 2S superconvergence of the aligned " *
               "single-constant-delay engine does not apply. (suppress with verbosity=0)" maxlog=1
-    build_vT(pb, S, p; force=force)
+    build_vT(pb, S, p; force=force, parallel=parallel)
 end
 
 """
@@ -174,14 +177,23 @@ which restricts the method to low/moderate state dimension.
 backward compatibility (no longer meaningful — no noise term is ever dropped).
 Extra `kwargs` (`tol`, `krylovdim`) go to the KrylovKit eigensolver.
 
+Parameter sweeps / stability maps: `build_parallel=false` disables the engine
+build's internal threading (the right choice when the sweep itself is threaded
+across points — parallelise over points, not inside them); `return_vec=true`
+returns `(ρ, v)` with the converged dominant eigenvector, and `x0=v` warm-starts
+the eigensolve from a neighbouring point's `v` (helps only at very tight
+tolerances — with the eager stopping rule the eigensolve is rarely the
+bottleneck).
+
 Supports multiple delays (single Wiener channel).
 """
 function spectralRadiusOfMapping_collocation(prob::LDDEProblem, period::Real,
                                              n_steps::Integer; S::Integer=3,
                                              force::Bool=false, verbosity::Integer=1,
+                                             build_parallel::Bool=Threads.nthreads() > 1,
                                              kwargs...)
     eng = _build_collocation(_collocation_prob(prob, period), S, n_steps;
-                             force=force, verbosity=verbosity)
+                             force=force, verbosity=verbosity, parallel=build_parallel)
     rho_H_krylov_v9m(eng; kwargs...)
 end
 
@@ -202,8 +214,9 @@ orders, and the scope restrictions.
 function fixPointOfMapping_collocation(prob::LDDEProblem, period::Real,
                                        n_steps::Integer; S::Integer=3,
                                        force::Bool=false, verbosity::Integer=1,
+                                       build_parallel::Bool=Threads.nthreads() > 1,
                                        kwargs...)
     eng = _build_collocation(_collocation_prob(prob, period), S, n_steps;
-                             force=force, verbosity=verbosity)
+                             force=force, verbosity=verbosity, parallel=build_parallel)
     fixPoint_v9m(eng; kwargs...)
 end

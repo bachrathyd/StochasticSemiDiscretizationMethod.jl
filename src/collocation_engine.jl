@@ -1157,9 +1157,11 @@ function _pack_ring(C, imap, Nv)
 end
 _inv_lmap(lmap) = (imap=similar(lmap); @inbounds for c in eachindex(lmap); imap[lmap[c]]=c; end; imap)
 
-function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=30)
-    haskey(eng, :vtops) && return _rho_H_krylov_vT_ring(eng; tol=tol, krylovdim=krylovdim)
-    haskey(eng, :ops) || return _rho_H_krylov_v9m_ref(eng; tol=tol, krylovdim=krylovdim)
+function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=30, x0=nothing, return_vec=false)
+    haskey(eng, :vtops) && return _rho_H_krylov_vT_ring(eng; tol=tol, krylovdim=krylovdim,
+                                                        x0=x0, return_vec=return_vec)
+    haskey(eng, :ops) || return _rho_H_krylov_v9m_ref(eng; tol=tol, krylovdim=krylovdim,
+                                                      x0=x0, return_vec=return_vec)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
     ws=V9Workspace(eng)
@@ -1171,16 +1173,19 @@ function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=30)
     function op(v)
         unpack!(v); _applyH_period_ring!(ws,eng); _pack_ring(C,imap,Nv) .- D
     end
-    x0=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k]; i==j && (x0[k]=1.0); end
+    xs = (x0 !== nothing && length(x0)==Nv) ? Vector{Float64}(x0) :
+         (v=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k]; i==j && (v[k]=1.0); end; v)
     # eager: stop as soon as the dominant eigenpair meets tol instead of always
     # building the full krylovdim-dimensional basis (halves the matvec count)
-    vals,_,_=KrylovKit.eigsolve(op,x0,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),
-                                maxiter=300,eager=true)
-    maximum(abs.(vals))
+    vals,vecs,_=KrylovKit.eigsolve(op,xs,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),
+                                   maxiter=300,eager=true)
+    ρ=maximum(abs.(vals))
+    return_vec || return ρ
+    v1=vecs[1]; (ρ, eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
 end
 
 # reference path (used only if an engine lacks precomputed ops)
-function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=30)
+function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=30, x0=nothing, return_vec=false)
     W=eng.W
     idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
     Nv=length(idx)
@@ -1188,14 +1193,17 @@ function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=30)
     sym2vec(C)=(v=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k];v[k]=C[i,j];end; v)
     D=sym2vec(_applyH(eng, zeros(W,W)))
     op(v)= sym2vec(_applyH(eng, vec2sym(v))) .- D
-    x0=sym2vec(Matrix{Float64}(I,W,W))
-    vals,_,_=KrylovKit.eigsolve(op,x0,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),maxiter=300)
-    maximum(abs.(vals))
+    xs = (x0 !== nothing && length(x0)==Nv) ? Vector{Float64}(x0) :
+         sym2vec(Matrix{Float64}(I,W,W))
+    vals,vecs,_=KrylovKit.eigsolve(op,xs,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),maxiter=300)
+    ρ=maximum(abs.(vals))
+    return_vec || return ρ
+    v1=vecs[1]; (ρ, eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
 end
 
-function fixPoint_v9m(eng; tol=1e-11, krylovdim=30)
-    haskey(eng, :vtops) && return _fixPoint_vT_ring(eng; tol=tol, krylovdim=krylovdim)
-    haskey(eng, :ops) || return _fixPoint_v9m_ref(eng; tol=tol, krylovdim=krylovdim)
+function fixPoint_v9m(eng; tol=1e-11, krylovdim=30, C0=nothing)
+    haskey(eng, :vtops) && return _fixPoint_vT_ring(eng; tol=tol, krylovdim=krylovdim, C0=C0)
+    haskey(eng, :ops) || return _fixPoint_v9m_ref(eng; tol=tol, krylovdim=krylovdim, C0=C0)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
     ws=V9Workspace(eng)
@@ -1205,7 +1213,10 @@ function fixPoint_v9m(eng; tol=1e-11, krylovdim=30)
     unpack!(v)=(@inbounds for k in 1:Nv;(i,j)=idx[k];C[i,j]=v[k];C[j,i]=v[k];end)
     fill!(C,0.0); _applyH_period_ring!(ws,eng); dvec=_pack_ring(C,imap,Nv)
     Hlin(v)=(unpack!(v); _applyH_period_ring!(ws,eng); _pack_ring(C,imap,Nv) .- dvec)
-    sol,info=KrylovKit.linsolve(v->v .- Hlin(v), dvec, dvec; tol=tol,
+    # warm start: the converged covariance from a neighbouring parameter point
+    g0 = C0 === nothing ? dvec :
+         (v=Vector{Float64}(undef,Nv); @inbounds for k in 1:Nv;(i,j)=idx[k];v[k]=C0[i,j];end; v)
+    sol,info=KrylovKit.linsolve(v->v .- Hlin(v), dvec, g0; tol=tol,
                                 krylovdim=min(krylovdim,Nv), maxiter=300)
     info.converged==0 && @warn "fixPoint_v9m: not fully converged" info
     Cout=zeros(W,W)
@@ -1214,7 +1225,7 @@ function fixPoint_v9m(eng; tol=1e-11, krylovdim=30)
 end
 
 # reference fixpoint path (used only if an engine lacks precomputed ops)
-function _fixPoint_v9m_ref(eng; tol=1e-11, krylovdim=30)
+function _fixPoint_v9m_ref(eng; tol=1e-11, krylovdim=30, C0=nothing)
     W=eng.W
     idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
     Nv=length(idx)
@@ -1222,7 +1233,8 @@ function _fixPoint_v9m_ref(eng; tol=1e-11, krylovdim=30)
     sym2vec(C)=(v=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k];v[k]=C[i,j];end; v)
     D=_applyH(eng, zeros(W,W)); dvec=sym2vec(D)
     Hlin(v)=sym2vec(_applyH(eng, vec2sym(v))) .- dvec
-    sol,info=KrylovKit.linsolve(v->v .- Hlin(v), dvec, dvec; tol=tol,
+    g0 = C0 === nothing ? dvec : sym2vec(C0)
+    sol,info=KrylovKit.linsolve(v->v .- Hlin(v), dvec, g0; tol=tol,
                                 krylovdim=min(krylovdim,Nv), maxiter=300)
     info.converged==0 && @warn "fixPoint_v9m: not fully converged" info
     vec2sym(sol)
@@ -2029,7 +2041,7 @@ function _applyH_period_ring_vT!(ws::VTWorkspace, eng)
     return o
 end
 
-function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=30)
+function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=30, x0=nothing, return_vec=false)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
     ws=VTWorkspace(eng)
@@ -2038,13 +2050,18 @@ function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=30)
     unpack!(v)=(@inbounds for k in 1:Nv;(i,j)=idx[k];C[i,j]=v[k];C[j,i]=v[k];end)
     fill!(C,0.0); _applyH_period_ring_vT!(ws,eng); D=_pack_ring(C,imap,Nv)
     op(v)=(unpack!(v); _applyH_period_ring_vT!(ws,eng); p=_pack_ring(C,imap,Nv); p.-=D; p)
-    x0=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k]; i==j && (x0[k]=1.0); end
-    vals,_,_=KrylovKit.eigsolve(op,x0,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),
-                                maxiter=300,eager=true)
-    maximum(abs.(vals))
+    # warm start: a converged eigenvector from a NEIGHBOURING parameter point (map
+    # sweeps) typically cuts the matvec count 2-3× vs the identity-diag default.
+    xs = (x0 !== nothing && length(x0)==Nv) ? Vector{Float64}(x0) :
+         (v=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k]; i==j && (v[k]=1.0); end; v)
+    vals,vecs,_=KrylovKit.eigsolve(op,xs,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),
+                                   maxiter=300,eager=true)
+    ρ=maximum(abs.(vals))
+    return_vec || return ρ
+    v1=vecs[1]; (ρ, eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
 end
 
-function _fixPoint_vT_ring(eng; tol=1e-11, krylovdim=30)
+function _fixPoint_vT_ring(eng; tol=1e-11, krylovdim=30, C0=nothing)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
     ws=VTWorkspace(eng)
@@ -2053,7 +2070,9 @@ function _fixPoint_vT_ring(eng; tol=1e-11, krylovdim=30)
     unpack!(v)=(@inbounds for k in 1:Nv;(i,j)=idx[k];C[i,j]=v[k];C[j,i]=v[k];end)
     fill!(C,0.0); _applyH_period_ring_vT!(ws,eng); dvec=_pack_ring(C,imap,Nv)
     Hlin(v)=(unpack!(v); _applyH_period_ring_vT!(ws,eng); p=_pack_ring(C,imap,Nv); p.-=dvec; p)
-    sol,info=KrylovKit.linsolve(v->v .- Hlin(v), dvec, dvec; tol=tol,
+    g0 = C0 === nothing ? dvec :
+         (v=Vector{Float64}(undef,Nv); @inbounds for k in 1:Nv;(i,j)=idx[k];v[k]=C0[i,j];end; v)
+    sol,info=KrylovKit.linsolve(v->v .- Hlin(v), dvec, g0; tol=tol,
                                 krylovdim=min(krylovdim,Nv), maxiter=300)
     info.converged==0 && @warn "fixPoint (vT ring): not fully converged" info
     Cout=zeros(W,W)
@@ -2152,7 +2171,12 @@ function _delay_bookkeeping(pb::ProbT, j::Integer, S, p, c, h, r_buf, has_beta_j
 end
 
 function build_vT(pb::ProbT, S, p; force=false, want_U::Bool=false,
-                  parallel::Bool = Threads.nthreads() > 1)
+                  parallel::Bool = Threads.nthreads() > 1 && Threads.threadid() == 1)
+    # `parallel` default: thread the per-step precompute UNLESS we appear to be
+    # inside an outer threaded region already (threadid() != 1) — a parameter sweep
+    # that threads across map points wants each point built serially. Imperfect
+    # (dynamic scheduling may place an outer task on thread 1) but safe: the worst
+    # case is nested threading, which Julia's scheduler composes.
     # β_j ≢ 0 (delayed multiplicative noise) is SUPPORTED per delay; g ≥ 1 delays.
     # `force` is accepted for backward compatibility (no longer meaningful).
     g=_ndelays(pb)

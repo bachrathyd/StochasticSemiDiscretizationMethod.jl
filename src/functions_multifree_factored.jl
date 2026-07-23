@@ -560,12 +560,19 @@ the pre-contracted covariance formulation, making moment-stability analysis of
 high-dimensional systems (``d`` up to hundreds of degrees of freedom) tractable.
 The result is algebraically identical to the assembled operator; mean-square
 stability corresponds to ``\\rho(\\mathcal{H}) < 1``. Keyword arguments are
-forwarded to the KrylovKit eigensolver (e.g. `krylovdim`).
+forwarded to the KrylovKit eigensolver (e.g. `krylovdim`). `return_vec=true`
+returns `(ρ, v)` with the converged dominant eigenvector and `x0=v` warm-starts
+the eigensolve from it (also makes the otherwise random start deterministic).
 """
-function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d}; args...) where d
+function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d};
+                                             x0=nothing, return_vec::Bool=false,
+                                             args...) where d
     r = div(rst.n, d) - 1
     D = CovVecIdx((r+1)*d).sectionStarts[end]
     cf = get_factored_coefficients(rst; include_additive=false)
+    # warm start: a converged eigenvector from a neighbouring parameter point (map
+    # sweeps) typically cuts the matvec count 2-3× vs the default random start.
+    v0 = (x0 !== nothing && length(x0) == D) ? Vector{Float64}(x0) : rand(D)
     # eager: stop once the dominant eigenpair meets tol instead of always
     # building the full krylovdim basis (≈ halves the matvec count); a
     # user-passed `eager` in args still wins (later duplicate overrides)
@@ -573,13 +580,17 @@ function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d}; args...) wh
         scf = staticize(cf, Val(d))
         sws = MFStaticWorkspace(Val(d), r)
         sop = MFStaticOperator(scf, rst, D, sws)
-        vals, _, _ = eigsolve(sop, rand(D), 1, :LM; eager=true, args...)
-        return abs(vals[1])
+        vals, vecs, _ = eigsolve(sop, v0, 1, :LM; eager=true, args...)
+        return_vec || return abs(vals[1])
+        v1 = vecs[1]
+        return (abs(vals[1]), eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
     end
     ws = MFFactoredWorkspace(d, r)
     op = MFFactoredOperator(cf, rst, D, ws)
-    vals, _, _ = eigsolve(op, rand(D), 1, :LM; eager=true, args...)
-    return abs(vals[1])
+    vals, vecs, _ = eigsolve(op, v0, 1, :LM; eager=true, args...)
+    return_vec || return abs(vals[1])
+    v1 = vecs[1]
+    (abs(vals[1]), eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
 end
 # convenience: build the Result and solve, bypassing dense coefficients entirely
 function spectralRadiusOfMapping_MF_factored(LDDEP::LDDEProblem, method::DiscretizationMethod,

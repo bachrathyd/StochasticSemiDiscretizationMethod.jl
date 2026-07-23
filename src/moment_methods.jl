@@ -122,7 +122,10 @@ smooth time-varying delay — see [`Collocation`](@ref)) or [`ClassicalSD`](@ref
 (first order, reference). The problem class is detected automatically and the
 best available engine is used; whenever the attainable order is below what the
 requested method advertises (or a fallback is taken), one warning explains the
-choice — set `verbosity=0` to silence. Mean-square stability corresponds to a
+choice — set `verbosity=0` to silence. For parameter sweeps: `build_parallel=false`
+disables the collocation build's internal threading (thread the sweep across
+points instead); `return_vec=true` returns `(ρ, v)` and `x0=v` warm-starts the
+next point's eigensolve. Mean-square stability corresponds to a
 value below `1`.
 """
 spectralRadiusOfMoment(prob::LDDEProblem, period::Real, n_steps::Integer;
@@ -135,7 +138,10 @@ _spectral_moment(prob, T, p, m::Collocation; verbosity::Integer=1, kwargs...) =
                                                   verbosity=verbosity, kwargs...),
         () -> _spectral_moment(prob, T, p, ClassicalSD(2)),   # kwargs NOT forwarded
         prob, T, p, m, verbosity)
-_spectral_moment(prob, T, p, m::ClassicalSD; verbosity::Integer=1, kwargs...) =
+# `build_parallel` is a collocation-build concept with no classical counterpart —
+# accepted and ignored so method-agnostic sweep code can pass it uniformly.
+_spectral_moment(prob, T, p, m::ClassicalSD; verbosity::Integer=1,
+                 build_parallel=nothing, kwargs...) =
     spectralRadiusOfMapping_MF_factored(_classical_result(prob, T, p, m.q; additive=false); kwargs...)
 
 """
@@ -158,10 +164,12 @@ _stationary_var(prob, T, p, m::Collocation; verbosity::Integer=1, kwargs...) =
         () -> _stationary_var(prob, T, p, ClassicalSD(2)),    # kwargs NOT forwarded
         prob, T, p, m, verbosity)
 function _stationary_var(prob, T, p, m::ClassicalSD; verbosity::Integer=1,
-                         tol=nothing, krylovdim=nothing, force=nothing, kwargs...)
+                         tol=nothing, krylovdim=nothing, force=nothing,
+                         build_parallel=nothing, C0=nothing, kwargs...)
     # courtesy: `tol` (the collocation/KrylovKit convention) translates to the
-    # gmres `reltol` of the factored fixpoint; `krylovdim`/`force` have no
-    # classical-variance counterpart and are ignored rather than crashing gmres
+    # gmres `reltol` of the factored fixpoint; `krylovdim`/`force`/`build_parallel`/
+    # `C0` have no classical-variance counterpart and are ignored rather than
+    # crashing gmres
     rst = _classical_result(prob, T, p, m.q; additive=true)
     tol === nothing ? fixPointOfMapping_MF_factored(rst; kwargs...)[1] :
                       fixPointOfMapping_MF_factored(rst; reltol=tol, kwargs...)[1]
