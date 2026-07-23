@@ -538,7 +538,8 @@ end
 
 rho_U_v8m(eng)=maximum(abs.(eigen(eng.U).values))
 
-function rho_H_krylov_v8m(eng; tol=1e-11, krylovdim=30)
+function rho_H_krylov_v8m(eng; tol=1e-11, krylovdim=0)
+    krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W
     idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
     Nv=length(idx)
@@ -560,7 +561,8 @@ end
 # when pb.σ ≠ 0 (rho_H_krylov_v8m would otherwise feed an AFFINE map into
 # KrylovKit.eigsolve, which silently returns a garbage "eigenvalue" polluted
 # by the constant drift — use THIS whenever the problem has additive noise).
-function rho_Hlin_krylov_v8m(eng; tol=1e-11, krylovdim=30)
+function rho_Hlin_krylov_v8m(eng; tol=1e-11, krylovdim=0)
+    krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W
     idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
     Nv=length(idx)
@@ -583,7 +585,8 @@ end
 # (every state-dependent noise term Mxx/Mxd/Mdd vanishes at C=0, and PC*P' is
 # exactly linear), so C* solves (I - Hlin) C* = D — a genuine linear system,
 # solved here by GMRES on the vech representation exactly like rho_H_krylov_v8m.
-function fixPoint_v8m(eng; tol=1e-11, krylovdim=30)
+function fixPoint_v8m(eng; tol=1e-11, krylovdim=0)
+    krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W
     idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
     Nv=length(idx)
@@ -804,6 +807,7 @@ end
 # (agreement ~1e-15), ~1000× cheaper.
 struct NoiseOpV9
     Mop::Matrix{Float64}                       # S·d² Σ-solve operator (C-independent)
+    MopF::LinearAlgebra.LU{Float64,Matrix{Float64},Vector{Int64}}   # its LU (once per step)
     a::Matrix{Float64}
     As::Vector{Matrix{Float64}}
     αs::Vector{Matrix{Float64}}
@@ -907,7 +911,7 @@ function _build_noiseop_v9(st::StepV9)
     end
     nzc = [j for j in 1:size(st.Yrows,2) if any(!iszero, @view st.Yrows[:,j])]
     Ynz = st.Yrows[:, nzc]
-    NoiseOpV9(Mop, a, st.As, st.αs, st.σs, nzc, Ynz, h, d, S, BSIZE, brs, bcs, Mten)
+    NoiseOpV9(Mop, lu(Mop), a, st.As, st.αs, st.σs, nzc, Ynz, h, d, S, BSIZE, brs, bcs, Mten)
 end
 
 # Assemble ΔB for a given covariance C using the precomputed operator.
@@ -948,7 +952,7 @@ function _noise_apply_add_nz_v9!(target, op::NoiseOpV9, Cnz)
     end
     rhs=zeros(S*d2)
     for j in 1:S, k in 1:S; rhs[(j-1)*d2+1:j*d2] .+= op.h*op.a[j,k].*vec(Egg[k]); end
-    vΣ=op.Mop\rhs
+    vΣ=ldiv!(op.MopF, rhs)          # Mop\rhs via the per-step LU (bit-identical)
     Rm=[Vector{Float64}(undef,d2) for _ in 1:S]
     for m in 1:S
         Σm=reshape(@view(vΣ[(m-1)*d2+1:m*d2]), d, d)
@@ -1157,11 +1161,20 @@ function _pack_ring(C, imap, Nv)
 end
 _inv_lmap(lmap) = (imap=similar(lmap); @inbounds for c in eachindex(lmap); imap[lmap[c]]=c; end; imap)
 
-function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=30, x0=nothing, return_vec=false)
+# Adaptive Krylov dimension: the second-moment Floquet spectrum of higher-d
+# problems is CLUSTERED near the dominant value (many nearly-critical branches),
+# where a small basis forces Arnoldi restarts that cost 4-5× in matvecs (measured
+# d=8: krylovdim 30 → 15.9s, 60 → 3.8s, identical ρ). Scale the default with d;
+# the basis is grown lazily so a generous cap is free when convergence is quick.
+# `krylovdim=0` means auto; any positive value is used as given.
+_auto_kd(d, krylovdim) = krylovdim > 0 ? krylovdim : min(30 * max(1, d ÷ 2), 120)
+
+function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=0, x0=nothing, return_vec=false)
     haskey(eng, :vtops) && return _rho_H_krylov_vT_ring(eng; tol=tol, krylovdim=krylovdim,
                                                         x0=x0, return_vec=return_vec)
     haskey(eng, :ops) || return _rho_H_krylov_v9m_ref(eng; tol=tol, krylovdim=krylovdim,
                                                       x0=x0, return_vec=return_vec)
+    krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
     ws=V9Workspace(eng)
@@ -1185,7 +1198,8 @@ function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=30, x0=nothing, return_vec=f
 end
 
 # reference path (used only if an engine lacks precomputed ops)
-function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=30, x0=nothing, return_vec=false)
+function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=0, x0=nothing, return_vec=false)
+    krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W
     idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
     Nv=length(idx)
@@ -1201,9 +1215,10 @@ function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=30, x0=nothing, return_
     v1=vecs[1]; (ρ, eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
 end
 
-function fixPoint_v9m(eng; tol=1e-11, krylovdim=30, C0=nothing)
+function fixPoint_v9m(eng; tol=1e-11, krylovdim=0, C0=nothing)
     haskey(eng, :vtops) && return _fixPoint_vT_ring(eng; tol=tol, krylovdim=krylovdim, C0=C0)
     haskey(eng, :ops) || return _fixPoint_v9m_ref(eng; tol=tol, krylovdim=krylovdim, C0=C0)
+    krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
     ws=V9Workspace(eng)
@@ -1225,7 +1240,8 @@ function fixPoint_v9m(eng; tol=1e-11, krylovdim=30, C0=nothing)
 end
 
 # reference fixpoint path (used only if an engine lacks precomputed ops)
-function _fixPoint_v9m_ref(eng; tol=1e-11, krylovdim=30, C0=nothing)
+function _fixPoint_v9m_ref(eng; tol=1e-11, krylovdim=0, C0=nothing)
+    krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W
     idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
     Nv=length(idx)
@@ -1664,6 +1680,7 @@ end
 # noise_block_vT (~1e-13), ~100× cheaper.
 struct NoiseOpVT
     Mop::Matrix{Float64}
+    MopF::LinearAlgebra.LU{Float64,Matrix{Float64},Vector{Int64}}   # per-step LU of Mop
     a::Matrix{Float64}
     As::Vector{Matrix{Float64}}
     αss::Vector{Vector{Matrix{Float64}}}          # [channel][stage]
@@ -1873,7 +1890,7 @@ function _assemble_noiseop(st::StepVT, Mop, Mten, brs, bcs)
     nzc=sort!(collect(nzset))
     Ynz=st.Yrows[:, nzc]
     Dnz=[[st.Dsels[j][k][:, nzc] for k in 1:S] for j in 1:g]
-    NoiseOpVT(Mop, a, st.As, st.αss, st.σss, st.βsss, st.K, nzc, Ynz, Dnz,
+    NoiseOpVT(Mop, lu(Mop), a, st.As, st.αss, st.σss, st.βsss, st.K, nzc, Ynz, Dnz,
               h, d, S, g, BSIZE, brs, bcs, Mten)
 end
 # fully d-parametric fast path: keeping d a compile-time parameter across the loops
@@ -1946,7 +1963,7 @@ function _noise_apply_add_nz_vT!(target, op::NoiseOpVT, Cnz)
     end
     rhs=zeros(S*d2)
     for j in 1:S, k in 1:S; rhs[(j-1)*d2+1:j*d2] .+= op.h*op.a[j,k].*vec(Egg[k]); end
-    vΣ=op.Mop\rhs
+    vΣ=ldiv!(op.MopF, rhs)          # Mop\rhs via the per-step LU (bit-identical)
     Rm=[Vector{Float64}(undef,d2) for _ in 1:S]
     for m in 1:S
         Σm=reshape(@view(vΣ[(m-1)*d2+1:m*d2]), d, d)
@@ -2041,7 +2058,8 @@ function _applyH_period_ring_vT!(ws::VTWorkspace, eng)
     return o
 end
 
-function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=30, x0=nothing, return_vec=false)
+function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=0, x0=nothing, return_vec=false)
+    krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
     ws=VTWorkspace(eng)
@@ -2061,7 +2079,8 @@ function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=30, x0=nothing, return_
     v1=vecs[1]; (ρ, eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
 end
 
-function _fixPoint_vT_ring(eng; tol=1e-11, krylovdim=30, C0=nothing)
+function _fixPoint_vT_ring(eng; tol=1e-11, krylovdim=0, C0=nothing)
+    krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
     ws=VTWorkspace(eng)
