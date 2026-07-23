@@ -249,6 +249,41 @@ milling entry/exit) cap at ≈ **1** — *for every discretization, regardless o
   the full order of the smooth-model solution — the modelling error is then a
   separate, controllable question.
 
+## Performance — which method, and how to parallelise a stability map
+
+Guidance from an accuracy-matched benchmark (`benchmark/bottleneck_matrix.jl`,
+error 1e-4 in ρ, 72 threads). **Write coefficient functions type-stably** —
+`@SMatrix`-returning, capturing `const`/`let` values, *not* non-`const` globals —
+or the collocation build boxes every quadrature-node coefficient call.
+
+**Per-point method choice** (at engineering tolerances ~1e-4…1e-6):
+
+| | small state (`d ≲ 4`) | large state (`d ≳ 6`) |
+|---|---|---|
+| accuracy target 1e-4…1e-6 | **`Collocation(3…5)`** — ~10× faster per point than classical | **`ClassicalSD(2)`** via the factored MF solver — collocation's covariance block is `O((2S+2)²d²)` and its solve is memory-bound |
+| very loose (≥1e-3) or huge `d` | `ClassicalSD(2)` (cheap build) | `ClassicalSD(2)` |
+
+`Collocation(1)` (order 2) is usually *not* worth it — on long-delay problems it
+stays pre-asymptotic and never reaches 1e-4; prefer `S ≥ 3`.
+
+**Parallelising a map/sweep** — the right strategy depends on per-point memory:
+
+- **Thread over the map points** (outer `Threads.@threads`) for classical SD and
+  for collocation at small `d` — **4–20× on many cores**. Pass
+  `build_parallel=false` to `spectralRadiusOfMoment`/`stationaryVariance` inside
+  the threaded loop so each point builds serially (this is already the default
+  when called from inside a threaded region).
+- **Do *not* thread over points for large-`d` collocation** (e.g. `Collocation(5)`,
+  `d=8`): each engine is 100 MB+, so 72 concurrent builds thrash the garbage
+  collector (measured 61% GC, *slower* than serial). Instead sweep the points
+  **serially** and let each point's build thread (`build_parallel=true`).
+
+**Eigensolver** — ρ(H) is found by a real partial-Schur Arnoldi (`solver=:schur`,
+the default; keeps the Krylov basis in `Float64`). `solver=:eigsolve` (former
+KrylovKit path) and `solver=:arpack` are also accepted. Sweeps can pass
+`return_vec=true` to get `(ρ, v)` and feed `v` back as `x0`/`C0` to warm-start a
+neighbouring point (helps only at very tight tolerances).
+
 
 [1] [Stochastic semi‐discretization for linear stochastic delay differential equations](https://onlinelibrary.wiley.com/doi/abs/10.1002/nme.6076) and the book
 [2] [Semi-Discretization for Time-Delay Systems (by Insperger and Stepan)](http://link.springer.com/10.1007/978-1-4614-0335-7).
