@@ -337,6 +337,110 @@ function staticize(cf::MFFactoredCoefficients, ::Val{d}) where d
     return MFFactoredCoefficientsS{d,L}(cf.K, det, stoch, detV, stochV, stochGV)
 end
 
+# ---------------------------------------------------------------------------
+# Fused static extraction: build MFFactoredCoefficientsS straight from the
+# Result, skipping the Matrix-based MFFactoredCoefficients intermediate (which
+# allocated thousands of small Matrices per point only to convert them to
+# SMatrix and throw them away — the dominant cost of a classical map POINT at
+# fine resolution). Values are produced by the identical arithmetic in the
+# identical order, so the result is bit-identical to
+# staticize(get_factored_coefficients(rst), Val(d)). d ≤ 8 path only.
+# helper split gives a function barrier on the concrete container types
+function _fc_det!(det, subMXs::Vector{TV}, ::Val{d}) where {TV,d}
+    L = d * d; S = SMatrix{d,d,Float64,L}
+    for submxs in subMXs
+        for i in eachindex(det)
+            smx = submxs[i]
+            for (range_idx, (r_target, r_source)) in enumerate(smx.ranges)
+                k = Int((r_source.start - 1) / d)
+                push!(det[i], (S(smx.MXs[range_idx]), k))
+            end
+        end
+    end
+    det
+end
+function _fc_stoch!(stoch, stsubMXs::Vector{TV}, sqw::Vector{Float64}, ::Val{d}) where {TV,d}
+    L = d * d; S = SMatrix{d,d,Float64,L}; K = length(sqw)
+    for stsubmxs in stsubMXs
+        for i in eachindex(stoch)
+            stsmx = stsubmxs[i]
+            w = stsmx.nID
+            for (range_idx, (r_target, r_source)) in enumerate(stsmx.ranges)
+                k = Int((r_source.start - 1) / d)
+                G = stsmx.MXfun[range_idx]
+                samples = Vector{S}(undef, K)
+                for m in 1:K
+                    sq = sqw[m]
+                    samples[m] = S(ntuple(q -> begin
+                        a = (q - 1) % d + 1; c = (q - 1) ÷ d + 1
+                        sq * G[a, c][m]
+                    end, Val(L)))
+                end
+                push!(stoch[i], (samples, k, w))
+            end
+        end
+    end
+    stoch
+end
+function _fc_gv!(stochGV, gs, w, i, stsubMXs::Vector{TV}, sqw::Vector{Float64}, ::Val{d}) where {TV,d}
+    L = d * d; S = SMatrix{d,d,Float64,L}; K = length(sqw)
+    for stsmx_list in stsubMXs
+        stsmx = stsmx_list[i]
+        stsmx.nID == w || continue
+        for (range_idx, (r_target, r_source)) in enumerate(stsmx.ranges)
+            k = Int((r_source.start - 1) / d)
+            G = stsmx.MXfun[range_idx]
+            Gsamp = Vector{S}(undef, K)
+            for m in 1:K
+                sq = sqw[m]
+                Gsamp[m] = S(ntuple(q -> begin
+                    a = (q - 1) % d + 1; c = (q - 1) ÷ d + 1
+                    sq * G[a, c][m]
+                end, Val(L)))
+            end
+            push!(stochGV[i], (Gsamp, gs, k, w))
+        end
+    end
+end
+function _factored_coefficients_static(rst::AbstractResult{d};
+                                       include_additive::Bool=false) where d
+    p = rst.n_steps
+    iim = rst.itoisometrymethod
+    K = length(iim)
+    sqw = [sqrt(iim[m] * iim.dt) for m in 1:K]
+    L = d * d; S = SMatrix{d,d,Float64,L}; V = SVector{d,Float64}
+    det = [Tuple{S,Int}[] for _ in 1:p]
+    _fc_det!(det, rst.subMXs, Val(d))
+    stoch = [Tuple{Vector{S},Int,Int}[] for _ in 1:p]
+    _fc_stoch!(stoch, rst.stsubMXs, sqw, Val(d))
+    detV = V[]
+    stochV = S[]
+    stochGV = [Tuple{Vector{S},Vector{V},Int,Int}[] for _ in 1:p]
+    if include_additive
+        detV = [zero(V) for _ in 1:p]
+        if rst.calculate_additive && !isempty(rst.subVs)
+            for i in 1:p; detV[i] = V(rst.subVs[i].V); end
+        end
+        stochV = [zero(S) for _ in 1:p]
+        if rst.calculate_additive && !isempty(rst.stsubVs)
+            for i in 1:p
+                res = zero(MMatrix{d,d,Float64,L})
+                for stsubv_list in rst.stsubVs
+                    stsv = stsubv_list[i]
+                    w = stsv.nID
+                    gs = [V(ntuple(a -> sqw[m] * stsv.Vfun[a][m], Val(d))) for m in 1:K]
+                    for m in 1:K, a in 1:d, b in 1:d
+                        res[a, b] += gs[m][a] * gs[m][b]
+                    end
+                    _fc_gv!(stochGV, gs, w, i, rst.stsubMXs, sqw, Val(d))
+                end
+                stochV[i] = SMatrix(res)
+            end
+        end
+    end
+    return MFFactoredCoefficientsS{d,L}(K, det, stoch, detV, stochV, stochGV)
+end
+
 struct MFStaticWorkspace{d,L}
     # covariance window, (r+1)×(r+1) blocks, stored TRANSPOSED: C[b,a] holds the
     # logical block C(a,b), so the hot cross-block sweep (fixed lag row, all m)
@@ -569,7 +673,6 @@ function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d};
                                              args...) where d
     r = div(rst.n, d) - 1
     D = CovVecIdx((r+1)*d).sectionStarts[end]
-    cf = get_factored_coefficients(rst; include_additive=false)
     # warm start: a converged eigenvector from a neighbouring parameter point (map
     # sweeps) typically cuts the matvec count 2-3× vs the default random start.
     v0 = (x0 !== nothing && length(x0) == D) ? Vector{Float64}(x0) : rand(D)
@@ -577,7 +680,7 @@ function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d};
     # building the full krylovdim basis (≈ halves the matvec count); a
     # user-passed `eager` in args still wins (later duplicate overrides)
     if d <= 8
-        scf = staticize(cf, Val(d))
+        scf = _factored_coefficients_static(rst; include_additive=false)
         sws = MFStaticWorkspace(Val(d), r)
         sop = MFStaticOperator(scf, rst, D, sws)
         vals, vecs, _ = eigsolve(sop, v0, 1, :LM; eager=true, args...)
@@ -585,6 +688,7 @@ function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d};
         v1 = vecs[1]
         return (abs(vals[1]), eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
     end
+    cf = get_factored_coefficients(rst; include_additive=false)
     ws = MFFactoredWorkspace(d, r)
     op = MFFactoredOperator(cf, rst, D, ws)
     vals, vecs, _ = eigsolve(op, v0, 1, :LM; eager=true, args...)
@@ -618,9 +722,8 @@ function fixPointOfMapping_MF_factored(rst::AbstractResult{d}; args...) where d
     r = div(rst.n, d) - 1
     D1 = (r+1)*d
     D2 = CovVecIdx(D1).sectionStarts[end]
-    cf = get_factored_coefficients(rst; include_additive=true)
     if d <= 8
-        scf = staticize(cf, Val(d))
+        scf = _factored_coefficients_static(rst; include_additive=true)
         sws = MFStaticWorkspace(Val(d), r)
         sop1 = M1StaticOperator(scf, rst, D1, sws)
         sk1 = apply_M1_static!(sws, scf, rst, zeros(D1), include_additive=true)
@@ -629,6 +732,7 @@ function fixPointOfMapping_MF_factored(rst::AbstractResult{d}; args...) where d
         sop2 = MFStaticOperator(scf, rst, D2, sws)
         return gmres(IMinusPhiOperator(sop2), sk2; reltol=1e-15, args...)
     end
+    cf = get_factored_coefficients(rst; include_additive=true)
     ws = MFFactoredWorkspace(d, r)
 
     op1 = M1FactoredOperator(cf, rst, D1, ws)
