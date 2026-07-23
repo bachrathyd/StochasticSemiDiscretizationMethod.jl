@@ -1769,7 +1769,9 @@ function _noiseop_loops_s(st::StepVT, Bf::BF, τf::TF, τmin::Float64, τmax::Fl
     As=ntuple(j->SMatrix{d,d,Float64}(st.As[j]), S)
     φst=ntuple(j->SMatrix{d,d,Float64}(st.φstage[j]), S)
     @inline φS(θ)=(Φ=Id; @inbounds for j in 1:S; Φ=Φ+(h*_lint(st.lcoef[j],θ))*(As[j]*φst[j]); end; Φ)
-    @inline BtS(θ)=(u=tn+θ*h; ww=_xi_inv_f(τf,τmin,τmax,u); Bf(ww)./(1.0-_dtau(τf,ww)))
+    # SMatrix conversion keeps L an SMatrix and stays allocation-free when Bf itself
+    # returns a stack type (the whole point of preserving the user's SMatrix coeff).
+    @inline BtS(θ)=(u=tn+θ*h; ww=_xi_inv_f(τf,τmin,τmax,u); SMatrix{d,d,Float64}(Bf(ww))./(1.0-_dtau(τf,ww)))
     @inline coefΣ(θ,m)=h*_lint(st.lcoef[m],θ)
     brs=UnitRange{Int}[]; bcs=UnitRange{Int}[]; Mten=Vector{Matrix{Float64}}[]
     newgroup!(br,bc)=(push!(brs,br); push!(bcs,bc);
@@ -1837,21 +1839,19 @@ function _noiseop_loops_s(st::StepVT, Bf::BF, τf::TF, τmin::Float64, τmax::Fl
     (Mten, brs, bcs)
 end
 
-# Assemble the per-step noise operator. `pb`/`tn` allow the SMatrix fast path to
-# read the concrete single-delay coefficient; a nothing `pb` forces the generic path.
-function _build_noiseop_vT(st::StepVT, pb=nothing, tn::Float64=0.0)
-    d=st.d; S=st.S; h=st.h; a=st.a; g=st.g; BSIZE=st.BSIZE; d2=d*d
-    Id=Matrix{Float64}(I,d,d)
-    Mop=Matrix{Float64}(I,S*d2,S*d2)
+function _build_mop(st::StepVT)
+    d=st.d; S=st.S; h=st.h; a=st.a; d2=d*d
+    Id=Matrix{Float64}(I,d,d); Mop=Matrix{Float64}(I,S*d2,S*d2)
     for i in 1:S, j in 1:S
         Lj=kron(Id,st.As[j]) .+ kron(st.As[j],Id)
         for ch in 1:st.K; Lj .+= kron(st.αss[ch][j],st.αss[ch][j]); end
         Mop[(i-1)*d2+1:i*d2, (j-1)*d2+1:j*d2] .-= h*a[i,j].*Lj
     end
-    Mten, brs, bcs = (pb !== nothing && st.g==1 && st.K==1) ?
-        _noiseop_loops_s(st, pb.Bs[1], pb.τfs[1], pb.τmins[1], pb.τmaxs[1], tn, Val(d)) :
-        _noiseop_loops_vT(st)
-    # gather columns: nonzero cols of Yrows and every Dsel
+    Mop
+end
+# gather nonzero read columns + build the NoiseOpVT from precomputed pieces
+function _assemble_noiseop(st::StepVT, Mop, Mten, brs, bcs)
+    d=st.d; S=st.S; h=st.h; a=st.a; g=st.g; BSIZE=st.BSIZE
     nzset=Set{Int}()
     for jj in 1:size(st.Yrows,2); any(!iszero, @view st.Yrows[:,jj]) && push!(nzset,jj); end
     for j in 1:g, k in 1:S, jj in 1:size(st.Dsels[j][k],2)
@@ -1862,6 +1862,24 @@ function _build_noiseop_vT(st::StepVT, pb=nothing, tn::Float64=0.0)
     Dnz=[[st.Dsels[j][k][:, nzc] for k in 1:S] for j in 1:g]
     NoiseOpVT(Mop, a, st.As, st.αss, st.σss, st.βsss, st.K, nzc, Ynz, Dnz,
               h, d, S, g, BSIZE, brs, bcs, Mten)
+end
+# fully d-parametric fast path: keeping d a compile-time parameter across the loops
+# AND the assembly keeps the result type-stable (a runtime Val(st.d) at the dispatch
+# below would otherwise infer the loops' return as Any and box the whole assembly).
+function _build_noiseop_s(st::StepVT, Bf::BF, τf::TF, τmin::Float64, τmax::Float64,
+                          tn::Float64, ::Val{d}) where {BF,TF,d}
+    Mten, brs, bcs = _noiseop_loops_s(st, Bf, τf, τmin, τmax, tn, Val(d))
+    _assemble_noiseop(st, _build_mop(st), Mten, brs, bcs)
+end
+# Assemble the per-step noise operator. `pb`/`tn` let the SMatrix fast path read the
+# concrete single-delay coefficient; a nothing `pb` (or multi-delay/channel) uses
+# the generic loops.
+function _build_noiseop_vT(st::StepVT, pb=nothing, tn::Float64=0.0)
+    if pb !== nothing && st.g==1 && st.K==1
+        return _build_noiseop_s(st, pb.Bs[1], pb.τfs[1], pb.τmins[1], pb.τmaxs[1], tn, Val(st.d))
+    end
+    Mten, brs, bcs = _noiseop_loops_vT(st)
+    _assemble_noiseop(st, _build_mop(st), Mten, brs, bcs)
 end
 
 function _noise_apply_vT!(ΔB, op::NoiseOpVT, C)

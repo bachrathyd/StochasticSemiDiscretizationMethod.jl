@@ -68,7 +68,10 @@ function _collocation_prob(prob::LDDEProblem, period::Real)
         all(isfinite, τsamp) ||
             error("delay τ_$j(t) returned a non-finite value on [0, T]")
         push!(τfs, τf); push!(τmins, minimum(τsamp)); push!(τmaxs, maximum(τsamp))
-        push!(Bs, t -> Matrix{Float64}(prob.Bs[j](t)))
+        # preserve the user's return type (an SMatrix stays stack-allocated) so the
+        # SMatrix noise-operator fast path stays allocation-free; the generic path
+        # converts with Matrix(...) as before.
+        push!(Bs, t -> prob.Bs[j](t))
     end
     cids = isempty(chans) ? Int[typemin(Int)] : chans   # trivial channel if noise-free
     chanidx = Dict(cid => i for (i, cid) in enumerate(cids))
