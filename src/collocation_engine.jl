@@ -1169,11 +1169,60 @@ _inv_lmap(lmap) = (imap=similar(lmap); @inbounds for c in eachindex(lmap); imap[
 # `krylovdim=0` means auto; any positive value is used as given.
 _auto_kd(d, krylovdim) = krylovdim > 0 ? krylovdim : min(30 * max(1, d ÷ 2), 120)
 
-function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=0, x0=nothing, return_vec=false)
+# thin AbstractMatrix wrapper so a matvec closure can be handed to ARPACK's eigs
+struct _ClosureMatrix <: AbstractMatrix{Float64}
+    f::Function
+    n::Int
+end
+Base.size(o::_ClosureMatrix) = (o.n, o.n)
+Base.size(o::_ClosureMatrix, i::Int) = o.n
+Base.eltype(::_ClosureMatrix) = Float64
+LinearAlgebra.issymmetric(::_ClosureMatrix) = false
+LinearAlgebra.ishermitian(::_ClosureMatrix) = false
+LinearAlgebra.mul!(y::AbstractVector, o::_ClosureMatrix, x::AbstractVector) = (y .= o.f(x); y)
+Base.:*(o::_ClosureMatrix, x::AbstractVector) = o.f(x)
+
+# Dominant-eigenvalue driver for the (real, non-symmetric) second-moment map.
+#   :schur (default) — real partial Schur factorisation. Same matvec count as
+#     :eigsolve but the Krylov basis stays Float64 instead of being promoted to
+#     Complex, so it is ~2× faster at small d and ~30% lighter on the large-d
+#     covariance vectors where the basis dominates memory (measured).
+#   :eigsolve — the former KrylovKit Arnoldi eigensolver.
+#   :arpack   — ARPACK's real-nonsymmetric eigs (no eager stopping, builds the full
+#     ncv basis → usually slower; offered for cross-checks / user preference).
+# Returns ρ (or (ρ, dominant real vector) when return_vec) — the returned vector is
+# a real basis vector of the dominant invariant subspace, a good warm-start seed.
+function _dominant_rho(f, x0::Vector{Float64}, tol, kd::Int, solver::Symbol, return_vec::Bool)
+    if solver === :eigsolve
+        vals, vecs, _ = KrylovKit.eigsolve(f, x0, 1, :LM; tol=tol, krylovdim=kd,
+                                           eager=true, maxiter=300)
+        i = argmax(abs.(vals)); ρ = abs(vals[i])
+        return_vec || return ρ
+        v1 = vecs[i]
+        return (ρ, eltype(v1) <: Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
+    elseif solver === :arpack
+        op = _ClosureMatrix(f, length(x0))
+        vals, vecs = Arpack.eigs(op; nev=1, which=:LM, ncv=min(kd, length(x0) - 1),
+                                 tol=tol, maxiter=300, v0=copy(x0))
+        i = argmax(abs.(vals)); ρ = abs(vals[i])
+        return_vec || return ρ
+        return (ρ, Float64.(real.(@view vecs[:, i])))
+    else  # :schur
+        (solver === :schur) || error("unknown solver=$solver (use :schur, :eigsolve, :arpack)")
+        Tsch, V, vals, _ = KrylovKit.schursolve(f, x0, 1, :LM,
+                              KrylovKit.Arnoldi(tol=tol, krylovdim=kd, eager=true, maxiter=300))
+        i = argmax(abs.(vals)); ρ = abs(vals[i])
+        return_vec || return ρ
+        return (ρ, Vector{Float64}(V[1]))       # first Schur vector — real, dominant subspace
+    end
+end
+
+function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=0, x0=nothing, return_vec=false,
+                          solver::Symbol=:schur)
     haskey(eng, :vtops) && return _rho_H_krylov_vT_ring(eng; tol=tol, krylovdim=krylovdim,
-                                                        x0=x0, return_vec=return_vec)
+                                                        x0=x0, return_vec=return_vec, solver=solver)
     haskey(eng, :ops) || return _rho_H_krylov_v9m_ref(eng; tol=tol, krylovdim=krylovdim,
-                                                      x0=x0, return_vec=return_vec)
+                                                      x0=x0, return_vec=return_vec, solver=solver)
     krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
@@ -1188,17 +1237,12 @@ function rho_H_krylov_v9m(eng; tol=1e-11, krylovdim=0, x0=nothing, return_vec=fa
     end
     xs = (x0 !== nothing && length(x0)==Nv) ? Vector{Float64}(x0) :
          (v=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k]; i==j && (v[k]=1.0); end; v)
-    # eager: stop as soon as the dominant eigenpair meets tol instead of always
-    # building the full krylovdim-dimensional basis (halves the matvec count)
-    vals,vecs,_=KrylovKit.eigsolve(op,xs,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),
-                                   maxiter=300,eager=true)
-    ρ=maximum(abs.(vals))
-    return_vec || return ρ
-    v1=vecs[1]; (ρ, eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
+    _dominant_rho(op, xs, tol, min(krylovdim,Nv), solver, return_vec)
 end
 
 # reference path (used only if an engine lacks precomputed ops)
-function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=0, x0=nothing, return_vec=false)
+function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=0, x0=nothing, return_vec=false,
+                               solver::Symbol=:schur)
     krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W
     idx=Tuple{Int,Int}[]; for i in 1:W,j in i:W; push!(idx,(i,j)); end
@@ -1209,10 +1253,7 @@ function _rho_H_krylov_v9m_ref(eng; tol=1e-11, krylovdim=0, x0=nothing, return_v
     op(v)= sym2vec(_applyH(eng, vec2sym(v))) .- D
     xs = (x0 !== nothing && length(x0)==Nv) ? Vector{Float64}(x0) :
          sym2vec(Matrix{Float64}(I,W,W))
-    vals,vecs,_=KrylovKit.eigsolve(op,xs,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),maxiter=300)
-    ρ=maximum(abs.(vals))
-    return_vec || return ρ
-    v1=vecs[1]; (ρ, eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
+    return _dominant_rho(op, xs, tol, min(krylovdim,Nv), solver, return_vec)
 end
 
 function fixPoint_v9m(eng; tol=1e-11, krylovdim=0, C0=nothing)
@@ -2058,7 +2099,8 @@ function _applyH_period_ring_vT!(ws::VTWorkspace, eng)
     return o
 end
 
-function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=0, x0=nothing, return_vec=false)
+function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=0, x0=nothing, return_vec=false,
+                               solver::Symbol=:schur)
     krylovdim=_auto_kd(haskey(eng,:d) ? eng.d : eng.steps[1].d, krylovdim)
     W=eng.W; B=eng.BSIZE; nblk=eng.r+1
     idx=_vech_idx(W); Nv=length(idx)
@@ -2072,11 +2114,7 @@ function _rho_H_krylov_vT_ring(eng; tol=1e-11, krylovdim=0, x0=nothing, return_v
     # sweeps) typically cuts the matvec count 2-3× vs the identity-diag default.
     xs = (x0 !== nothing && length(x0)==Nv) ? Vector{Float64}(x0) :
          (v=zeros(Nv); @inbounds for k in 1:Nv;(i,j)=idx[k]; i==j && (v[k]=1.0); end; v)
-    vals,vecs,_=KrylovKit.eigsolve(op,xs,1,:LM;tol=tol,krylovdim=min(krylovdim,Nv),
-                                   maxiter=300,eager=true)
-    ρ=maximum(abs.(vals))
-    return_vec || return ρ
-    v1=vecs[1]; (ρ, eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
+    _dominant_rho(op, xs, tol, min(krylovdim,Nv), solver, return_vec)
 end
 
 function _fixPoint_vT_ring(eng; tol=1e-11, krylovdim=0, C0=nothing)

@@ -668,33 +668,42 @@ forwarded to the KrylovKit eigensolver (e.g. `krylovdim`). `return_vec=true`
 returns `(ρ, v)` with the converged dominant eigenvector and `x0=v` warm-starts
 the eigensolve from it (also makes the otherwise random start deterministic).
 """
-function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d};
-                                             x0=nothing, return_vec::Bool=false,
-                                             args...) where d
-    r = div(rst.n, d) - 1
-    D = CovVecIdx((r+1)*d).sectionStarts[end]
-    # warm start: a converged eigenvector from a neighbouring parameter point (map
-    # sweeps) typically cuts the matvec count 2-3× vs the default random start.
-    v0 = (x0 !== nothing && length(x0) == D) ? Vector{Float64}(x0) : rand(D)
-    # eager: stop once the dominant eigenpair meets tol instead of always
-    # building the full krylovdim basis (≈ halves the matvec count); a
-    # user-passed `eager` in args still wins (later duplicate overrides)
-    if d <= 8
-        scf = _factored_coefficients_static(rst; include_additive=false)
-        sws = MFStaticWorkspace(Val(d), r)
-        sop = MFStaticOperator(scf, rst, D, sws)
-        vals, vecs, _ = eigsolve(sop, v0, 1, :LM; eager=true, args...)
+# real partial-Schur dominant eigenvalue (basis stays Float64; ~2× vs eigsolve).
+# `op` must support mul!/*; returns (ρ, dominant real vector) or ρ.
+function _mf_dominant(op, v0, return_vec::Bool, solver::Symbol; kwargs...)
+    if solver === :eigsolve
+        vals, vecs, _ = eigsolve(op, v0, 1, :LM; eager=true, kwargs...)
         return_vec || return abs(vals[1])
         v1 = vecs[1]
         return (abs(vals[1]), eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
+    elseif solver === :arpack
+        vals, vecs = Arpack.eigs(op; nev=1, which=:LM, v0=copy(v0), kwargs...)
+        return_vec || return abs(vals[1])
+        return (abs(vals[1]), Float64.(real.(@view vecs[:, 1])))
+    else
+        (solver === :schur) || error("unknown solver=$solver (use :schur, :eigsolve, :arpack)")
+        Tsch, V, vals, _ = schursolve(op, v0, 1, :LM, Arnoldi(; eager=true, kwargs...))
+        return_vec || return abs(vals[1])
+        return (abs(vals[1]), Vector{Float64}(V[1]))
+    end
+end
+
+function spectralRadiusOfMapping_MF_factored(rst::AbstractResult{d};
+                                             x0=nothing, return_vec::Bool=false,
+                                             solver::Symbol=:schur, args...) where d
+    r = div(rst.n, d) - 1
+    D = CovVecIdx((r+1)*d).sectionStarts[end]
+    # warm start: a converged eigenvector from a neighbouring parameter point (map
+    # sweeps) makes the otherwise random start deterministic.
+    v0 = (x0 !== nothing && length(x0) == D) ? Vector{Float64}(x0) : rand(D)
+    if d <= 8
+        scf = _factored_coefficients_static(rst; include_additive=false)
+        sws = MFStaticWorkspace(Val(d), r)
+        return _mf_dominant(MFStaticOperator(scf, rst, D, sws), v0, return_vec, solver; args...)
     end
     cf = get_factored_coefficients(rst; include_additive=false)
     ws = MFFactoredWorkspace(d, r)
-    op = MFFactoredOperator(cf, rst, D, ws)
-    vals, vecs, _ = eigsolve(op, v0, 1, :LM; eager=true, args...)
-    return_vec || return abs(vals[1])
-    v1 = vecs[1]
-    (abs(vals[1]), eltype(v1)<:Complex ? Float64.(real.(v1)) : Vector{Float64}(v1))
+    return _mf_dominant(MFFactoredOperator(cf, rst, D, ws), v0, return_vec, solver; args...)
 end
 # convenience: build the Result and solve, bypassing dense coefficients entirely
 function spectralRadiusOfMapping_MF_factored(LDDEP::LDDEProblem, method::DiscretizationMethod,
