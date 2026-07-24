@@ -41,12 +41,20 @@ the paper's single-threaded protocol is required for the factored solves.
 - beam text (d=32, D=2.16×10⁶): **134 → 142 s** (schur's small time cost at moderate d;
   value bit-identical, ρ(H)=1.2254511).
 
+- `grand_triple` (Fig 5, PD-Mathieu work-precision, CPU-time axis) — **regenerated
+  round-3**. The IBP dev-harness (`cov_colloc_v8_ibp.jl`) deleted at packaging was
+  reconstructed from git history and adapted to the current package (imports the
+  internal base symbols `StepV8`/`_lagr_coefs`/`_lint`/`_G8`/`gl_tab` so it loads
+  without the also-deleted `cov_colloc_v8.jl`); the full 12-method sweep (SDM q=2/4,
+  GL-1..5, IBP GL-1..5) was re-run at the 60 s/solve journal cap. The SDM cost curves
+  now reach p=4096 (was p≈1536 at the same cap — a ~10× left-shift); accuracy values
+  bit-identical. Generators committed to `benchmark/` (grand_orders_{pub,fix}.jl,
+  plot_grand_triple.jl, cov_colloc_v8_ibp.jl) for reproducibility.
+- σc=1.0 (5×) SSV milling chart — added as a pure appendix figure (`app:ssv5x`,
+  `ssv_chart_5x.png` already committed); main-text Fig 9 stays at the physical
+  σc=0.2, with its caption now pointing to the appendix.
+
 **Not regenerated (with reason):**
-- `grand_triple` (PD-Mathieu work-precision, CPU-time axis) — its data + IBP dev
-  harness (`highorder/cov_colloc_v8_ibp.jl`) were deleted at packaging and IBP is not
-  in the shipped package, so it cannot be cleanly regenerated. Round-3 only makes its
-  curves *faster*, so the round-2 figure is **conservative** (understates the
-  advantage); all plotted accuracy values are bit-identical. Kept.
 - `grand_orders_pub`, `grand_stored`, `pd_mathieu_orders`, `fig1_sykora_fig4_repro`,
   `beam_mesh_convergence`, `ssv_chart` (Fig 8), `cmp_iklodi`, `ssv_vt_orders`,
   `helical_milling_order` — value / order / resolution axes ⇒ bit-identical, pixel-
