@@ -42,7 +42,9 @@ function Result(LDDEP::LDDEProblem{d,AT,BT, cT}, method::DiscretizationMethod{fT
     if calculate_additive
         subVs = Vector{SubV{SVector{d,eltype(eltype(A_avgs))}}}(undef, n_steps) # []
         s_type = SArray{Tuple{K},Float64,1,K}
-        stsubVs = Vector{Vector{stSubV{SizedArray{Tuple{d},s_type,1,1,Vector{s_type}}}}}(undef, LDDEP.w);
+        # one slot per additive noise term (each carries its own nID); not one per noise source:
+        # with fewer additive terms than sources the broadcast in registerStAdditiveResults! duplicated them
+        stsubVs = Vector{Vector{stSubV{SizedArray{Tuple{d},s_type,1,1,Vector{s_type}}}}}(undef, length(LDDEP.σs));
         # stSubV(LDDEP.dnoise.delayMX.τ.τ.ws, [Vector{SubV}(undef,n_steps) for i in LDDEP.dnoise.delayMX.τ.τ.ws]) # []
     else
         subVs = Vector{SubV{SVector{d,eltype(eltype(A_avgs))}}}(undef, 0)

@@ -54,3 +54,5 @@ function tests()
     end
 end
 tests()
+
+include("noise_ids.jl")
